@@ -124,7 +124,7 @@ def main(_config: dict):
         # plt.show()
 
         print(f"X train: {x_train.shape[0]}, x_val: {x_val.shape[0]}, y_train: {y_train.shape[0]}, y_val: {y_val.shape[0]}")
-        trained_model = pickle.load(open("model_Rec_66_Prec_49_threshold_02.pkl", 'rb'))
+        trained_model = pickle.load(open("models/model_Rec_66_Prec_49_threshold_02.pkl", 'rb'))
 
         print('Metrics on TRAIN set:')
         test(trained_model, x_train, y_train)
