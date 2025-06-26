@@ -55,7 +55,14 @@ def prepare_dataset(_dataset: pd.DataFrame, _test_split: float, _normalize: bool
     return x_train, x_test, y_train, y_test
 
 def test(_model, trn, trg):
+    def adjusted_precision(P, N, M, new_N, new_M):
+        numerator = P * (new_N / N)
+        denominator = numerator + (1 - P) * (new_M / M)
+        return numerator / denominator
+
     thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    N_1 = len([y for y in trg if y == 1])
+    N_0 = len([y for y in trg if y == 0])
 
     for thrs in thresholds:
         print(f"Testing on united data with threshold = {thrs}...")
@@ -65,6 +72,7 @@ def test(_model, trn, trg):
         f1_united = f1_score(trg, predictions)
         recall_united = recall_score(trg, predictions)
         precision_united = precision_score(trg, predictions)
+        precision_united = adjusted_precision(precision_united, N_1, N_0, 160, 840)
         print(f"CatBoost result: F1 = {f1_united:.2f}, Recall = {recall_united:.2f}, Precision - {precision_united:.2f}")
         result = confusion_matrix(trg, predictions, normalize='true')
         sn.set(font_scale=1.4)  # for label size
@@ -111,6 +119,8 @@ def main(_config: dict):
         #
         # d_train = d_train.drop(columns=['total_spacetime_area'])
         # d_test = d_test.drop(columns=['total_spacetime_area'])
+
+
 
         x_train = d_train.drop('ACTIVITY_AND_ATTRITION', axis=1)
         y_train = d_train['ACTIVITY_AND_ATTRITION']
