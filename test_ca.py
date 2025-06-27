@@ -1,26 +1,8 @@
-"""
-  Created on Jan 2025
-@author: Elena Markova
-          for Attrition Rate Project
-"""
-
-import os
-
-os.environ['YDATA_LICENSE_KEY'] = '97d0ae93-9dfc-4c2a-9183-a0420a4d0771'
-
 import pickle
-import warnings
 
 import numpy as np
 import pandas as pd
-import xgboost as xgb
-import optuna
-from optuna.pruners import MedianPruner
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.metrics import r2_score, precision_score, recall_score, f1_score, confusion_matrix
-from sklearn.model_selection import train_test_split, cross_val_score
-from pytorch_tabnet.tab_model import TabNetClassifier
-import torch
 from catboost import CatBoostClassifier, Pool
 
 from pathlib import Path
@@ -30,29 +12,6 @@ import seaborn as sn
 import matplotlib.pyplot as plt
 
 from utils.dataset import create_features_for_datasets, collect_datasets, minority_class_resample, prepare_dataset_2, get_united_dataset
-
-def prepare_dataset(_dataset: pd.DataFrame, _test_split: float, _normalize: bool):
-    target_idx = -1  # index of "works/left" column
-
-    dataset = _dataset.transpose()
-    trg = dataset[target_idx:]
-    trn = dataset[:target_idx]
-
-    # val_size = 2000
-    # trn = trn.transpose()
-    # trg = trg.transpose()
-    # x_train = trn[val_size:]
-    # x_test = trn[:val_size]
-    # y_train = trg[val_size:]
-    # y_test = trg[:val_size]
-
-    x_train, x_test, y_train, y_test = train_test_split(trn.transpose(), trg.transpose(), test_size=_test_split)
-
-    if _normalize:  # normalization is NOT needed for decision trees!
-        x_train = normalize(x_train)
-        x_test  = normalize(x_test)
-
-    return x_train, x_test, y_train, y_test
 
 def test(_model, trn, trg):
     def adjusted_precision(P, N, M, new_N, new_M):
