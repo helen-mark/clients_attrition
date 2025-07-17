@@ -24,6 +24,7 @@ from sklearn.model_selection import train_test_split, cross_val_score
 from pytorch_tabnet.tab_model import TabNetClassifier
 import torch
 from catboost import CatBoostClassifier, Pool
+from sklearn.feature_selection import RFECV
 
 import shap
 
@@ -33,7 +34,7 @@ from pathlib import Path
 import seaborn as sn
 import matplotlib.pyplot as plt
 
-from utils.dataset_70_40 import create_features_for_datasets, collect_datasets, minority_class_resample, prepare_dataset_2, get_united_dataset
+from utils.dataset_13 import create_features_for_datasets, collect_datasets, minority_class_resample, prepare_dataset_2, get_united_dataset
 
 # industry_avg_income = df.groupby('field')['income_shortterm'].mean().to_dict()
 # df['industry_avg_income'] = df['field'].map(industry_avg_income)
@@ -114,8 +115,22 @@ def show_importance(_x_train, _y_train, _model):
 #    shap.dependence_plot("weather_winter_avg_0", shap_values, _x_train)
 #    shap.dependence_plot("weather_winter_sum_0", shap_values, _x_train)
 #    shap.dependence_plot("weather_winter_avg_1", shap_values, _x_train)
-    shap.dependence_plot("weather_sum_0", shap_values, _x_train)
-    shap.dependence_plot("weather_sum_1", shap_values, _x_train)
+    #shap.dependence_plot("weather_sum_0", shap_values, _x_train)
+    #shap.dependence_plot("weather_sum_1", shap_values, _x_train)
+    #shap.dependence_plot("TaxPaid", shap_values, _x_train)
+    shap.dependence_plot("Price", shap_values, _x_train)
+    shap.dependence_plot("Firm_age_months", shap_values, _x_train)
+    #shap.dependence_plot("drivers_per_address", shap_values, _x_train)
+    #shap.dependence_plot("РентАктивов_Много ниже нормы", shap_values, _x_train)
+    #shap.dependence_plot("РентАктивов_Выше нормы", shap_values, _x_train)
+    shap.dependence_plot("_bankrots2016БаллЗона_deriv", shap_values, _x_train)
+    #shap.dependence_plot("_bankrots2016БаллЗона_after_Высокий балл", shap_values, _x_train)
+    #shap.dependence_plot("_bankrots2016БаллЗона_after_Средний балл", shap_values, _x_train)
+    #shap.dependence_plot("_bankrots2016БаллЗона_after_Низкий балл", shap_values, _x_train)
+    shap.dependence_plot("_problemCredit_БаллЗона_deriv", shap_values, _x_train)
+    #shap.dependence_plot("_problemCredit_БаллЗона_after_Высокий балл", shap_values, _x_train)
+    #shap.dependence_plot("_problemCredit_БаллЗона_after_Средний балл", shap_values, _x_train)
+    #shap.dependence_plot("_problemCredit_БаллЗона_after_Низкий балл", shap_values, _x_train)
 
 
 def train_catboost(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_feats_encoded, _num_iters):
@@ -136,21 +151,35 @@ def train_catboost(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_fe
     #     od_type='IncToDec',  # Early stopping
     #     od_wait=70,  # Patience before stopping
     # )
+    #CatBoostClassifier._clear_training_state()  # Critical for looped execution
 
     model = CatBoostClassifier(
-        iterations=965,  # 400  # Fewer trees + early stopping
-        learning_rate=0.16,  # 0.08,  # Smaller steps for better generalization
+        iterations=643,  # 400  # Fewer trees + early stopping
+        learning_rate=0.12,  # 0.08,  # Smaller steps for better generalization
         depth=4,  # Slightly deeper but not excessive
-        l2_leaf_reg=3,  # 10,  # Stronger L2 regularization
+        l2_leaf_reg=9,  # 10,  # Stronger L2 regularization
         bootstrap_type='MVS',
         # bagging_temperature=1,  # Less aggressive subsampling
-        random_strength=3,  # Default randomness
+        random_strength=2,  # Default randomness
         loss_function='Logloss',
         eval_metric='AUC',
+        auto_class_weights='Balanced',
         # auto_class_weights='Balanced',  # Adjust for class imbalance
-        od_type='Iter',  # Early stopping
-        od_wait=75,  # Patience before stopping
+        od_type='IncToDec',  # Early stopping
+        od_wait=65,  # Patience before stopping
+        silent=True
     )
+
+    selector = RFECV(
+        estimator=model,
+        step=1,
+        cv=3,
+        scoring='roc_auc'
+    )
+    #selector.fit(_x_train, _y_train)
+
+    #selected_features = _x_train.columns[selector.support_]
+    #print(f'Selected features: {selected_features}')
 
     # model = CatBoostClassifier(
     #     iterations=933, #400  # Fewer trees + early stopping
@@ -168,15 +197,6 @@ def train_catboost(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_fe
     #     random_seed=42
     # )
 
-    # perform parameters optimization by grid search method
-    # grid = {'learning_rate': [0.03, 0.1, 0.01, 0.2], 'depth': [4,6,8,10], 'l2_leaf_reg': [1, 3, 5, 7, 10], 'od_wait': [5, 10, 20, 100], 'od_type': ['Iter', 'IncToDec'], 'bagging_temperature': [0.5, 1],
-    #         'random_strength': [1, 2, 3]}
-    # res = model.grid_search(grid,
-    #                         X=_x_train,
-    #                         y=_y_train,
-    #                         # n_iter=500,
-    #                         plot=True)
-    #print(f"Best CatBoost params: {res}")
 
     def objective(trial):
         train_pool = Pool(_x_train, _y_train)
@@ -188,23 +208,24 @@ def train_catboost(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_fe
                 'random_strength': trial.suggest_int('random_strength', 1, 3),
                 'bootstrap_type': trial.suggest_categorical('bootstrap_type', ['Bayesian', 'MVS'])}
         model = CatBoostClassifier(**params, verbose=0)
-        score = cross_val_score(model, pd.concat([_x_train, _x_test]), pd.concat([_y_train, _y_test]), cv=3, scoring='f1').mean()
+        score = cross_val_score(model, pd.concat([_x_train, _x_test]), pd.concat([_y_train, _y_test]), cv=3, scoring='roc_auc').mean()
         return score
-    #study = optuna.create_study(direction='maximize')
-    #study.optimize(objective, n_trials=350)
-    #print(f"Best parameters of optuna: {study.best_params}")
+
+    study = optuna.create_study(direction='maximize')
+#    study.optimize(objective, n_trials=370)
+#    print(f"Best parameters of optuna: {study.best_params}")
 
     model.fit(
         _x_train,
         _y_train,
         eval_set=(_x_test, _y_test),
         verbose=False,
-        sample_weight=_sample_weight,
+        # sample_weight=_sample_weight,
         # plot=True,
         # cat_features=_cat_feats_encoded - do this if haven't encoded cat features
     )
     # model = pickle.load(open('model_Rec_70_prec_40_thres_05.pkl', 'rb'))
-    show_importance(_x_train, _y_train, model)
+    #show_importance(_x_train, _y_train, model)
 
     return model
 
@@ -473,14 +494,14 @@ def test(_model, trn, trg):
         f1_united = f1_score(trg, predictions)
         recall_united = recall_score(trg, predictions)
         precision_united = precision_score(trg, predictions)
-        precision_united = adjusted_precision(precision_united, N_1, N_0, 1600, 8400)
+        precision_united = adjusted_precision(precision_united, N_1, N_0, 1800, 8200)
         print(f"CatBoost result: F1 = {f1_united:.2f}, Recall = {recall_united:.2f}, Precision - {precision_united:.2f}")
         result = confusion_matrix(trg, predictions, normalize='true')
         sn.set(font_scale=1.4)  # for label size
         sn.heatmap(result, annot=True, annot_kws={"size": 16})  # font size
 
-        plt.show()
-        plt.clf()
+        #plt.show()
+        #plt.clf()
     return f1_united, recall_united, precision_united
 
 def calc_weights(_y_train: pd.DataFrame, _y_val: pd.DataFrame):
@@ -498,15 +519,29 @@ def calc_weights(_y_train: pd.DataFrame, _y_val: pd.DataFrame):
 
 
 def main(_config: dict):
+
+    # Clear potentially problematic globals
+    if 'datasets' in globals():
+        del globals()['datasets']
+
     data_path = _config['dataset_src']
     datasets = collect_datasets(data_path)
     rand_states = [4] # range(5)  # [777, 42, 6, 1370, 5087]
     score = [0, 0, 0]
 
     for c in datasets[0].columns:
-            if 'Credit' in c:
-                if 'Надежность' in c or 'before' not in c:
+            if 'Credit' in c or 'bankrot' in c:
+                if 'Надежность' in c: # or 'before' not in c:
                     _config['cat_features'] += [c]
+                    for d in datasets:
+                        d[c] = d[c].astype(str)
+            elif c == 'КоэфТекЛикв' or c == 'РентАктивов':
+                _config['cat_features'] += [c]
+                for d in datasets:
+                    d[c] = d[c].astype(str)
+            elif 'Коэф' in c or 'Рент' in c or 'Обор' in c:
+                for i, d in enumerate(datasets):
+                    datasets[i] = d.drop(columns=c)
 
     if _config['calculated_features']:
         datasets, new_cat_feat = create_features_for_datasets(datasets)
@@ -524,7 +559,8 @@ def main(_config: dict):
         #
         # d_train = d_train.drop(columns=['total_spacetime_area'])
         # d_test = d_test.drop(columns=['total_spacetime_area'])
-
+        d_train = d_train[d_train['Dur_months'] >=12].copy()
+        d_test = d_test[d_test['Dur_months']>=12].copy()
 
         x_train = d_train.drop('ACTIVITY_AND_ATTRITION', axis=1)
         y_train = d_train['ACTIVITY_AND_ATTRITION']
@@ -549,6 +585,7 @@ def main(_config: dict):
         _, _, _ = test(trained_model, x_train, y_train)
         print('Metrics on TEST set:')
         f1, r, p = test(trained_model, x_val, y_val)
+
         score[0] += f1
         score[1] += r
         score[2] += p
@@ -562,6 +599,13 @@ def main(_config: dict):
     with open('model.pkl', 'wb') as f:
        print("Saving model..")
        pickle.dump(trained_model, f)
+    return r, p
+
+
+def train_model(config):
+    """Wrapper function for training in isolated process"""
+    return main(config.copy())
+
 
 
 if __name__ == '__main__':
@@ -571,7 +615,7 @@ if __name__ == '__main__':
         'num_iters': 10,
         'normalize': False,  # normalize input values or not
         'maximize': 'Precision',  # metric to maximize
-        'dataset_src': 'data/v12',
+        'dataset_src': 'data/v14',
         'encode_categorical': True,
         'calculated_features': True,
         'make_synthetic': None,  # options: 'sdv', 'ydata', None
@@ -579,7 +623,9 @@ if __name__ == '__main__':
         'cat_features': ['Seasonality', 'legal_type']  # , 'legal_type']  # , 'DRIVER_FIO', 'Entity Type', 'taxcode']  #, 'kbktax', 'kbknametax']  #, 'occupational_hazards']
     }
 
-    main(config)
+    # Use context manager for proper resource cleanup
+    r, p = main(config)
+
 
 # 97d0ae93-9dfc-4c2a-9183-a0420a4d0771
 
@@ -634,4 +680,12 @@ if __name__ == '__main__':
   *(Identifies clients who heavily depend on winter cleaning)*  
 
 
-Would you like me to refine any of these based on a specific business goal (e.g., predicting churn, maximizing revenue, or improving engagement)?"""
+Selected features: Index(['Active_months', 'Dur_months', 'Firm_age_months', 'Price',
+       'SQM_SINGLE_MATS_IN_ACTIVE_SPECIFICATIONS', 'TaxPaid', 'Turnover_deriv',
+       'Turnover_max_last_12', 'Turnover_median_last_12',
+       'Turnover_sum_last_12', 'n_debits', 'n_drivers_per_12', 'sqm_mean',
+       'sqm_median', 'sqm_sum', 'sum_debits', 'total_spacetime_area',
+       'weather_sum_0', 'weather_sum_1', 'weighted_changes',
+       'spacetime_area_mean', 'total_spacetime_area_fraction',
+       'Turnover_mean_last_12', 'Frequency_of_changes_mean',
+       'n_recalculations_mean', 'drivers_per_address'], """

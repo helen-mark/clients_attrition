@@ -295,7 +295,7 @@ def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, 
 
     trn = pd.concat([trn1, trn2]).reset_index().drop(columns=['index'])
     rows_1 = trn[trn['ACTIVITY_AND_ATTRITION'] == 1]
-    rows_2 = trn[trn['ACTIVITY_AND_ATTRITION'] == 0].sample(n=2000)
+    rows_2 = trn[trn['ACTIVITY_AND_ATTRITION'] == 0].sample(n=3000)
     trn = pd.concat([rows_1, rows_2]).reset_index()
     # print('TO REMOVE\n', rows_to_remove)
     # trn = trn.drop(rows_to_remove.index)
