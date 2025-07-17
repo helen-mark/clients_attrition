@@ -11,7 +11,7 @@ from pathlib import Path
 import seaborn as sn
 import matplotlib.pyplot as plt
 
-from utils.dataset import create_features_for_datasets, collect_datasets, minority_class_resample, prepare_dataset_2, get_united_dataset
+from utils.dataset_13 import create_features_for_datasets, collect_datasets, minority_class_resample, prepare_dataset_2, get_united_dataset
 
 def test(_model, trn, trg):
     def adjusted_precision(P, N, M, new_N, new_M):
@@ -19,7 +19,7 @@ def test(_model, trn, trg):
         denominator = numerator + (1 - P) * (new_M / M)
         return numerator / denominator
 
-    thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    thresholds = [0.012]
     N_1 = len([y for y in trg if y == 1])
     N_0 = len([y for y in trg if y == 0])
 
@@ -31,7 +31,7 @@ def test(_model, trn, trg):
         f1_united = f1_score(trg, predictions)
         recall_united = recall_score(trg, predictions)
         precision_united = precision_score(trg, predictions)
-        precision_united = adjusted_precision(precision_united, N_1, N_0, 160, 840)
+        precision_united = adjusted_precision(precision_united, N_1, N_0, 180, 820)
         print(f"CatBoost result: F1 = {f1_united:.2f}, Recall = {recall_united:.2f}, Precision - {precision_united:.2f}")
         result = confusion_matrix(trg, predictions, normalize='true')
         sn.set(font_scale=1.4)  # for label size
@@ -61,7 +61,7 @@ def main(_config: dict):
     rand_states = [4] # range(5)  # [777, 42, 6, 1370, 5087]
 
     if _config['calculated_features']:
-        datasets, new_cat_feat = create_features_for_datasets(datasets)
+        datasets, new_cat_feat = create_features_for_datasets(datasets, _config)
         _config['cat_features'] += new_cat_feat
 
 
@@ -79,6 +79,8 @@ def main(_config: dict):
         # d_train = d_train.drop(columns=['total_spacetime_area'])
         # d_test = d_test.drop(columns=['total_spacetime_area'])
 
+        d_train = d_train[d_train['Dur_months'] >= 12]
+        d_test = d_test[d_test['Dur_months'] >= 12]
 
 
         x_train = d_train.drop('ACTIVITY_AND_ATTRITION', axis=1)
@@ -93,10 +95,10 @@ def main(_config: dict):
         # plt.show()
 
         print(f"X train: {x_train.shape[0]}, x_val: {x_val.shape[0]}, y_train: {y_train.shape[0]}, y_val: {y_val.shape[0]}")
-        trained_model = pickle.load(open("models/model_Rec_66_Prec_49_threshold_02.pkl", 'rb'))
+        trained_model = pickle.load(open("models/model_38_65_0012.pkl", 'rb'))
 
-        print('Metrics on TRAIN set:')
-        test(trained_model, x_train, y_train)
+        #print('Metrics on TRAIN set:')
+        #test(trained_model, x_train, y_train)
         print('Metrics on TEST set:')
         test(trained_model, x_val, y_val)
 
@@ -108,12 +110,12 @@ if __name__ == '__main__':
         'num_iters': 10,
         'normalize': False,  # normalize input values or not
         'maximize': 'Precision',  # metric to maximize
-        'dataset_src': 'data/v7',
+        'dataset_src': 'data/v14',
         'encode_categorical': True,
         'calculated_features': True,
         'make_synthetic': None,  # options: 'sdv', 'ydata', None
         'smote': False,  # perhaps not needed for catboost and in case if minority : majority > 0.5
-        'cat_features': ['Seasonality', 'legal_type']  #, 'occupational_hazards']
+        'cat_features': ['Seasonality', 'legal_type']
     }
 
     main(config)
