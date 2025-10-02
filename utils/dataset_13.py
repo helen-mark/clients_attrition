@@ -23,7 +23,7 @@ def dataframe_to_dataset(dataframe: pd.DataFrame):
     dataframe = dataframe.copy()
     labels = dataframe.pop("status")
     ds = tf.data.Dataset.from_tensor_slices((dict(dataframe), labels))
-    ds = ds.shuffle(buffer_size=len(dataframe))
+    ds = ds.shuffle(buffer_size=len(dataframe), seed=43)
     return ds
 
 
@@ -73,7 +73,7 @@ def minority_class_resample(_dataset: pd.DataFrame, _cat_feat: list):
     df_resampled['ACTIVITY_AND_ATTRITION'] = y_resampled
     return df_resampled
 
-def collect_datasets(_data_path: str):
+def collect_datasets(_data_path: str, _eliminate_june: bool = False):
     datasets = []
     for filename in sorted(os.listdir(_data_path)):
         if '.csv' not in filename:
@@ -81,11 +81,14 @@ def collect_datasets(_data_path: str):
         dataset_path = os.path.join(_data_path, filename)
         print(filename)
         dataset = pd.read_csv(dataset_path)
+        if _eliminate_june:
+            dataset['upper_bound'] = pd.to_datetime(dataset['upper_bound'])
+            dataset = dataset[~((dataset['upper_bound'].dt.month == 6) & (dataset['upper_bound'].dt.year == 2025))]
         print("cols before", dataset.columns)
-        strings_to_drop = ['city', 'latest', 'Latest', 'First_date', 'First date', 'start_date', 'ДАТА', 'upper_b', 'Unnamed', 'Знач', 'FIO',
+        strings_to_drop = ['city', 'latest', 'Latest', 'First_date', 'First date', 'start_date', 'ДАТА', 'upper_b', 'Unnamed', 'Знач', 'FIO',# 'AVG_P', 'MEDIAN_P',
                            #'Обор', 'Коэф', 'Рент',
                           #'SQM_SINGLE_MATS_IN_ACTIVE_SPECIFICATIONS',
-                           'sum_recalculations', 'er_avg_0', 'er_avg_1', 'weather_avg_', 'winter_sum_1',
+                           'sum_recalculations', 'er_avg_0', 'er_avg_1', 'weather_avg_', 'winter_sum_1', 'AVG_PRICE_', 'MEDIAN_PRICE_',
                            'undelivered', 'Entity', 'kbk', 'code', # 'Tax', 'tax', 'Fines', 'Arrears', 'Penalti',
                            #'weather',
                            #'address',
@@ -279,11 +282,9 @@ def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, 
     #         sample_df, _ = encode_categorical(sample_df, encoder)
 
     trn1 = _datasets[1]
-    trn2 = _datasets[2]
+    trn2 = pd.concat([_datasets[2], _datasets[3]])
     #trn3 = _datasets[3]
-    tst = _datasets[0]
-    print(tst.columns, tst.columns)
-    print(trn1.columns, trn2.columns)
+    tst = _datasets[0]  # pd.concat([_datasets[0], _datasets[3]]).reset_index(drop=True)
 
     if _normalize:
         print('Performing normalization...')
@@ -295,12 +296,11 @@ def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, 
 
     trn = pd.concat([trn1, trn2]).reset_index().drop(columns=['index'])
     rows_1 = trn[trn['ACTIVITY_AND_ATTRITION'] == 1]
-    rows_2 = trn[trn['ACTIVITY_AND_ATTRITION'] == 0].sample(n=3500)
+    rows_2 = trn[trn['ACTIVITY_AND_ATTRITION'] == 0] #.sample(n=3500)
     trn = pd.concat([rows_1, rows_2]).reset_index()
     # print('TO REMOVE\n', rows_to_remove)
     # trn = trn.drop(rows_to_remove.index)
-    trn = shuffle(trn).drop(columns=['index'])
-
+    trn = shuffle(trn, random_state=43).drop(columns=['index'])
 
     print('Train dataset concat, normalized:\n', trn)
 
@@ -326,7 +326,8 @@ def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, 
 
 
 def add_quality_features(df: pd.DataFrame, _total_ds: pd.DataFrame):
-    print(df.columns)
+    original_types = df.dtypes
+    calculated_cat_feat = []
     # v7:
     # df['total_spacetime_area'] = df['total_spacetime_area'] / df['Active_months']
     # df['total_spacetime_area_normalized'] = df['total_spacetime_area'] * 100 / df['total_spacetime_area'].sum()
@@ -400,13 +401,19 @@ def add_quality_features(df: pd.DataFrame, _total_ds: pd.DataFrame):
     df['drivers_per_address'] = df['n_drivers_per_12'] / df['unique_addresses_last_12']
     #df = df.drop(columns='unique_addresses_last_12')
 
-    #df['turnover_group'] = pd.qcut(_total_ds['Turnover_sum_last_12'], q=5, labels=['low', 'medium_low', 'medium', 'medium_high', 'high'], duplicates='drop')
+    for c in df.columns:
+        if 'AVG_PRICE' in c:
+            df[c] = pd.qcut(_total_ds[c], q=5, labels=['low', 'medium_low', 'medium', 'medium_high', 'high'], duplicates='drop')
+            calculated_cat_feat.append(c)
     #df['turnover_vs_seasonality'] = df['turnover_group'].astype('str') + '_' + df['Seasonality'].astype('str')
     df['carpet_area'] = df['sqm_sum'] / (df['Frequency_of_changes_sum'])
-    #df = df.drop(columns=['Frequency_of_changes_sum', 'Turnover_sum_last_12', 'total_recalculations', 'sqm_sum'])
+    df = df.drop(columns=['Frequency_of_changes_sum', 'Turnover_sum_last_12', 'total_recalculations', 'sqm_sum'])
 
-    calculated_cat_feat = []  #'turnover_group', 'turnover_vs_seasonality']
-
+    new_columns = set(df.columns) - set(original_types.index)
+    calculated_cat_feat.extend([
+        col for col in new_columns
+        if pd.api.types.is_string_dtype(df[col])  # Checks if dtype is string/object
+    ])
 
     return df, calculated_cat_feat
 
@@ -418,11 +425,13 @@ def create_features_for_datasets(_datasets: list, _config):
     for c in _datasets[0].columns:
             if 'Credit' in c or 'bankrot' in c:
                 if 'Надежность' in c: # or 'before' not in c:
-                    _config['cat_features'] += [c]
+                    if c not in _config['cat_features']:
+                        _config['cat_features'] += [c]
                     for d in _datasets:
                         d[c] = d[c].astype(str)
             elif c == 'КоэфТекЛикв' or c == 'РентАктивов':
-                _config['cat_features'] += [c]
+                if c not in _config['cat_features']:
+                    _config['cat_features'] += [c]
                 for d in _datasets:
                     d[c] = d[c].astype(str)
             elif 'Коэф' in c or 'Рент' in c or 'Обор' in c:

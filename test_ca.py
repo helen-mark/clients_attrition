@@ -2,7 +2,7 @@ import pickle
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import r2_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import r2_score, precision_score, recall_score, f1_score, confusion_matrix, balanced_accuracy_score
 from catboost import CatBoostClassifier, Pool
 
 from pathlib import Path
@@ -11,7 +11,7 @@ from pathlib import Path
 import seaborn as sn
 import matplotlib.pyplot as plt
 
-from utils.dataset_13 import create_features_for_datasets, collect_datasets, minority_class_resample, prepare_dataset_2, get_united_dataset
+from utils.dataset_13 import create_features_for_datasets, collect_datasets, minority_class_resample, prepare_dataset_2
 
 def test(_model, trn, trg):
     def adjusted_precision(P, N, M, new_N, new_M):
@@ -19,7 +19,7 @@ def test(_model, trn, trg):
         denominator = numerator + (1 - P) * (new_M / M)
         return numerator / denominator
 
-    thresholds = [0.012]
+    thresholds = [0.066]
     N_1 = len([y for y in trg if y == 1])
     N_0 = len([y for y in trg if y == 0])
 
@@ -31,8 +31,10 @@ def test(_model, trn, trg):
         f1_united = f1_score(trg, predictions)
         recall_united = recall_score(trg, predictions)
         precision_united = precision_score(trg, predictions)
-        precision_united = adjusted_precision(precision_united, N_1, N_0, 180, 820)
-        print(f"CatBoost result: F1 = {f1_united:.2f}, Recall = {recall_united:.2f}, Precision - {precision_united:.2f}")
+        precision_united = adjusted_precision(precision_united, N_1, N_0, 1800, 8200)
+        a = balanced_accuracy_score(trg, predictions)
+
+        print(f"CatBoost result: F1 = {f1_united:.2f}, Recall = {recall_united:.2f}, Precision - {precision_united:.2f}, ba - {a:.2f}")
         result = confusion_matrix(trg, predictions, normalize='true')
         sn.set(font_scale=1.4)  # for label size
         sn.heatmap(result, annot=True, annot_kws={"size": 16})  # font size
@@ -79,8 +81,8 @@ def main(_config: dict):
         # d_train = d_train.drop(columns=['total_spacetime_area'])
         # d_test = d_test.drop(columns=['total_spacetime_area'])
 
-        d_train = d_train[d_train['Dur_months'] >= 12]
-        d_test = d_test[d_test['Dur_months'] >= 12]
+        d_train = d_train[d_train['Dur_months'] >= 7]
+        d_test = d_test[d_test['Dur_months'] >= 7]
 
 
         x_train = d_train.drop('ACTIVITY_AND_ATTRITION', axis=1)
@@ -95,7 +97,7 @@ def main(_config: dict):
         # plt.show()
 
         print(f"X train: {x_train.shape[0]}, x_val: {x_val.shape[0]}, y_train: {y_train.shape[0]}, y_val: {y_val.shape[0]}")
-        trained_model = pickle.load(open("models/model_38_65_0012.pkl", 'rb'))
+        trained_model = pickle.load(open("model.pkl", 'rb'))
 
         #print('Metrics on TRAIN set:')
         #test(trained_model, x_train, y_train)
@@ -109,13 +111,12 @@ if __name__ == '__main__':
         'model': 'CatBoostClassifier',  # options: 'TabNet', 'RandomForestClassifier', 'XGBoostClassifier', 'CatBoostClassifier'
         'num_iters': 10,
         'normalize': False,  # normalize input values or not
-        'maximize': 'Precision',  # metric to maximize
-        'dataset_src': 'data/v14',
+        'dataset_src': 'data/v19',
         'encode_categorical': True,
         'calculated_features': True,
         'make_synthetic': None,  # options: 'sdv', 'ydata', None
         'smote': False,  # perhaps not needed for catboost and in case if minority : majority > 0.5
-        'cat_features': ['Seasonality', 'legal_type']
+        'cat_features': ['legal_type']
     }
 
     main(config)
