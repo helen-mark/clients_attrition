@@ -11,13 +11,15 @@ import pandas as pd
 
 # for file in *Август2025_Москва.csv; do     echo "Converting $file to UTF-8...";     iconv -f cp1251 -t utf-8 "$file" > "${file%.csv}_utf8.csv"; done
 
-cutoff_date = datetime(2026, 2, 28)
-cutoff_date_soft = datetime(2026, 2, 30)
-
 class CreateDataset:
-    def __init__(self, data_begin_date, data_load_date):
+    def __init__(self, data_begin_date, data_load_date, test_dataset_snapshot_date, edit_censored, cutoff_date, cutoff_soft, randomize):
         self.data_begin_date = data_begin_date
         self.data_load_date = data_load_date
+        self.edit_censored = edit_censored
+        self.test_dataset_snapshot_date = test_dataset_snapshot_date
+        self.cutoff_date = cutoff_date
+        self.cutoff_soft = cutoff_soft
+        self.randomize = randomize
 
         self.renaming_df = pd.read_csv('reports/Переименования/rename_report.csv', delimiter=';', quotechar='"')
         self.renaming_df['OLD_INN'] = self.renaming_df['OLD_INN'].apply(self.modify_inn)
@@ -145,7 +147,9 @@ class CreateDataset:
             print('YES')
         else:
             print('NO')
-        result = result.loc[(result['ACTIVITY_AND_ATTRITION'] == 0) | (result['Latest_date'] < self.data_load_date)]
+        if self.edit_censored:
+            # Set ACTIVITY_AND_ATTRITION to 0 for rows where it's 1 AND Latest_date >= data_load_date
+            result.loc[(result['ACTIVITY_AND_ATTRITION'] == 1) & (result['Latest_date'] > self.test_dataset_snapshot_date), 'ACTIVITY_AND_ATTRITION'] = 0
         print(f'result len after filter 2: {len(result)}')
         if (result['INN'] == 9719032921).any():
             print('YES')
@@ -487,9 +491,9 @@ class CreateDataset:
         # if latest_date.month > self.data_load_date.month: # LSTM rule
         #     return 0
 
-        if latest_date <= cutoff_date:  #.year >= cutoff_date.year and latest_date.month >= cutoff_date.month:  # < cutoff_date:  # gone long enough
+        if latest_date <= self.cutoff_date:  #.year >= CUTOFF_DATE.year and latest_date.month >= CUTOFF_DATE.month:  # < CUTOFF_DATE:  # gone long enough
             return 1
-        elif latest_date <= cutoff_date_soft: # the client disappeared in spring 2025
+        elif latest_date <= self.cutoff_soft: # the client disappeared in spring 2025
             if self.is_seasonal(group) in [1, 2]:  # has been a seasonal client last year or the year before last
                 return 0  # assume the client is not gone
             else:  # not seasonal - more likely that the client is really gone
@@ -501,7 +505,7 @@ class CreateDataset:
 
     def add_dates_and_bounds(self, _df: pd.DataFrame):
         latest_dates_tmp = _df.groupby('INN')['Month'].max().reset_index()
-        months = 1  #(self.data_load_date.year - self.data_begin_date.year) * 12 + (self.data_load_date.month - self.data_begin_date.month) + 1
+        months = (self.data_load_date.year - self.data_begin_date.year) * 12 + (self.data_load_date.month - self.data_begin_date.month) + 1 if self.randomize else 1
         random_dates = [
             (self.data_load_date - pd.DateOffset(months=1) * np.random.randint(0, months)).replace(day=1)  # upper value not included in randint
             for _ in range(len(latest_dates_tmp))
@@ -675,20 +679,27 @@ class CreateDataset:
 
     def add_debits(self, result: pd.DataFrame):
         all_debits = self.collect_all_debits()
-        latest_dates = result[['INN', 'upper_bound', 'Latest_date', 'start_date']]
+        latest_dates = result[['INN', 'upper_bound', 'Latest_date', 'start_date', '6m_date', '3m_date']]
         d_merged = pd.merge(all_debits, latest_dates, on='INN', how='inner')
         d_last_12 = d_merged[d_merged['spec_date'].between(
             d_merged['start_date'], d_merged['upper_bound'])]
+        d_last_6 = d_merged[d_merged['spec_date'].between(
+            d_merged['6m_date'], d_merged['upper_bound'])]
+        d_last_3 = d_merged[d_merged['spec_date'].between(
+            d_merged['3m_date'], d_merged['upper_bound'])]
 
         d_last_12['debit'] = d_last_12['Всего'] - d_last_12['Период']
+        d_last_6['debit'] = d_last_6['Всего'] - d_last_6['Период']
+        d_last_3['debit'] = d_last_3['Всего'] - d_last_3['Период']
 
-        d_info = d_last_12.groupby('INN').apply(lambda x: pd.Series({
-            'sum_debits': x['debit'].astype(int).sum(),
-            'n_debits': x['debit'].notna().astype(int).replace(0, np.nan).count()
-            # 'total_debit': x['Всего'].astype(int).iloc[0],
-            # 'num_debits': len(x)
-        })).reset_index()
-        result = pd.merge(result, d_info, on='INN', how='left').fillna(0)
+        for n, period_df in [('12', d_last_12), ('6', d_last_6), ('3', d_last_3)]:
+            d_info = period_df.groupby('INN').apply(lambda x: pd.Series({
+                'sum_debits_'+n: x['debit'].astype(int).sum(),
+                'n_debits_'+n: x['debit'].notna().astype(int).replace(0, np.nan).count()
+            })).reset_index()
+
+            result = pd.merge(result, d_info, on='INN', how='left').fillna(0)
+
         return result
 
     def merge_with_recalculations(self, result):
@@ -701,11 +712,11 @@ class CreateDataset:
 
         # merged_df = pd.merge(recalc_df, upper_bounds, on='INN', how='left')
         # merged_df = merged_df.dropna(subset=['upper_bound'])
-        # merged_df['cutoff_date'] = merged_df['upper_bound'].apply(lambda x: x - relativedelta(months=11))
+        # merged_df['CUTOFF_DATE'] = merged_df['upper_bound'].apply(lambda x: x - relativedelta(months=11))
 
         # Filter for last 12 months of activity
         # last_12m_df = merged_df[merged_df['ACTION_DATE'].between(
-        #    merged_df['cutoff_date'],
+        #    merged_df['CUTOFF_DATE'],
         #    merged_df['upper_bound'],
         #    inclusive='both'
         # )]
@@ -735,8 +746,15 @@ class CreateDataset:
         df = self._add_activity_and_attrition(df)
         df = self._add_date_bounds(df)
 
-        result = self._create_main_result(df)
+        result = df.groupby('INN').apply(self._aggregate_client_data).reset_index()
 
+        # Debug check
+        if (result['INN'] == 9719032921).any():
+            print('YES')
+        else:
+            print('NO')
+
+        result = self.add_debits(result)
         # Add all feature groups - pass specs_df to avoid reloading
         result = self._add_specifications_features(result, specs_df)
         result = self._add_trip_features(result)
@@ -770,8 +788,8 @@ class CreateDataset:
         df = pd.merge(df, activity_and_attrition, on='INN', how='left')
 
         # Debug print
-        mask_1 = df['ACTIVITY_AND_ATTRITION'] == 1
-        print('\nLATEST DATES\n', df.loc[mask_1, 'Latest_date'])
+        #mask_1 = df['ACTIVITY_AND_ATTRITION'] == 1
+        #print('\nLATEST DATES\n', df.loc[mask_1, 'Latest_date'])
 
         return df
 
@@ -784,31 +802,19 @@ class CreateDataset:
         df['start_date'] = df['upper_bound'].apply(
             lambda x: x - pd.DateOffset(months=11)
         )
+        df['3m_date'] = df['upper_bound'].apply(
+            lambda x: x - pd.DateOffset(months=2)
+        )
+        df['6m_date'] = df['upper_bound'].apply(
+            lambda x: x - pd.DateOffset(months=5)
+        )
         return df
-
-    def _create_main_result(self, df):
-        """Create the main aggregated result dataframe"""
-        result = df.groupby('INN').apply(self._aggregate_client_data).reset_index()
-
-        # Debug check
-        if (result['INN'] == 9719032921).any():
-            print('YES')
-        else:
-            print('NO')
-
-        result = self.add_debits(result)
-
-        # Debug check
-        if (result['INN'] == 9719032921).any():
-            print('YES')
-        else:
-            print('NO')
-
-        return result
 
     def _aggregate_client_data(self, x):
         """Aggregate data for a single client"""
         last_12_months = self.get_last_n_months(x, 12)
+        last_6_months = self.get_last_n_months(x, 6)
+        last_3_months = self.get_last_n_months(x, 3)
         has_valid_dates = (x['Month'].max() > self.data_begin_date and
                            x['Month'].min() < self.data_load_date)
 
@@ -819,13 +825,24 @@ class CreateDataset:
             'city': x['City'].iloc[0] if 'City' in x.columns else None,
             # 'Cluster': x['Cluster'].iloc[0] if 'Cluster' in x.columns else None,
             'Turnover_sum_last_12': last_12_months['Turnover'].sum(),
+            'Turnover_3': last_3_months['Turnover'].sum(),
+            'Turnover_6': last_6_months['Turnover'].sum(),
             'Turnover_max_last_12': last_12_months['Turnover'].max(),
             'Turnover_median_last_12': (
                 last_12_months['Turnover'].median() if has_valid_dates else 0
             ),
             # 'Turnover_avg_last_3': get_last_3_months(x)['Turnover'].mean(),
-            'Turnover_deriv': (
+            'Turnover_deriv_1': (
                     last_12_months['Turnover'].max() - last_12_months['Turnover'].min()
+            ),
+            'Turnover_deriv_2': (
+                    last_6_months['Turnover'].max() - last_3_months['Turnover'].max()
+            ),
+            'sqm_deriv_1': (
+                    last_12_months['sqm'].max() - last_12_months['sqm'].min()
+            ),
+            'sqm_deriv_2': (
+                    last_6_months['sqm'].max() - last_3_months['sqm'].max()
             ),
             'Latest_date': x['Month'].max(),  # .strftime('%b-%y'),
             'First_date_from_reports': x['Month'].min(),  # It is clipped in the report by 01.01.2022!
@@ -1015,10 +1032,20 @@ class CreateDataset:
 
 
 def main():
-    #for mnth in range(5,6):
-    data_begin_date = datetime(2025, 5, 1)
-    data_load_date = datetime(2026, 3, 30)
-    cd = CreateDataset(data_begin_date, data_load_date)
+    config = {
+        'cutoff_date': datetime(2026, 2, 28),
+        'cutoff_date_soft': datetime(2026, 3, 30),
+        'test_dataset_snapshot_date': datetime(2025, 5,
+                                              1),  # the border where test data starts. To take test attrition dates starting from this date
+        # The period to collect all the clients active for at least one day within
+        # (data_begin_date is not the bound for historical information retrieval):
+        'data_begin_date': datetime(2023, 5, 1),
+        'data_load_date': datetime(2024, 5, 1),
+        'edit_censored_data': True,
+        'randomize': True
+    }
+    cd = CreateDataset(config['data_begin_date'], config['data_load_date'], config['test_dataset_snapshot_date'],
+                       config['edit_censored_data'], config['cutoff_date'], config['cutoff_date_soft'], config['randomize'])
     cd.create_dataset()
 
 
