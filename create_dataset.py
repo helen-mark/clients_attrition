@@ -9,16 +9,19 @@ import openpyxl
 import os
 import pandas as pd
 
+from create_tags_statistics_per_INN import MailTagProcessor, create_attrition_features
+
 # for file in *Август2025_Москва.csv; do     echo "Converting $file to UTF-8...";     iconv -f cp1251 -t utf-8 "$file" > "${file%.csv}_utf8.csv"; done
 
 class CreateDataset:
-    def __init__(self, data_begin_date, data_load_date, test_dataset_snapshot_date, edit_censored, cutoff_date, cutoff_soft, randomize):
+    def __init__(self, data_begin_date, data_load_date, test_dataset_snapshot_date, edit_censored, cutoff_date, cutoff_soft, horison, randomize):
         self.data_begin_date = data_begin_date
         self.data_load_date = data_load_date
         self.edit_censored = edit_censored
         self.test_dataset_snapshot_date = test_dataset_snapshot_date
         self.cutoff_date = cutoff_date
         self.cutoff_soft = cutoff_soft
+        self.horison = horison
         self.randomize = randomize
 
         self.renaming_df = pd.read_csv('reports/Переименования/rename_report.csv', delimiter=';', quotechar='"')
@@ -147,14 +150,6 @@ class CreateDataset:
             print('YES')
         else:
             print('NO')
-        if self.edit_censored:
-            # Set ACTIVITY_AND_ATTRITION to 0 for rows where it's 1 AND Latest_date >= data_load_date
-            result.loc[(result['ACTIVITY_AND_ATTRITION'] == 1) & (result['Latest_date'] > self.test_dataset_snapshot_date), 'ACTIVITY_AND_ATTRITION'] = 0
-        print(f'result len after filter 2: {len(result)}')
-        if (result['INN'] == 9719032921).any():
-            print('YES')
-        else:
-            print('NO')
         result = result.loc[(result['First_date_from_reports'] < self.data_load_date)]
         print(f'result len after filter 3: {len(result)}')
         if (result['INN'] == 9719032921).any():
@@ -184,6 +179,10 @@ class CreateDataset:
             print('YES')
         else:
             print('NO')
+
+        result = result[(result['ACTIVITY_AND_ATTRITION']==0) | (result['Latest_date'] >= result['upper_bound'])]
+        print(f'result len after filter 6: {len(result)}')
+
         inns_list = pd.read_csv('new_control.csv')[
             'INN'].apply(self.modify_inn).apply(self.match_inn).tolist()  # Convert to list
 
@@ -484,7 +483,6 @@ class CreateDataset:
         # If no such year found
         return 0
 
-    # Функция для проверки активности
     def is_inactive(self, group):
         latest_date = group['Month'].iloc[0]
 
@@ -511,12 +509,7 @@ class CreateDataset:
             for _ in range(len(latest_dates_tmp))
         ]
         random_dates = pd.DatetimeIndex(random_dates)    # Clip the values
-        print('Random dates:', random_dates)
-        print('Month:', latest_dates_tmp['Month'])
-        print(self.data_load_date)
         latest_dates_tmp['upper_bound'] = latest_dates_tmp['Month'].clip(upper=random_dates)
-        print('UB:', latest_dates_tmp['upper_bound'])
-        # latest_dates['upper_bound'] = latest_dates['Month'].clip(upper=data_load_date)
         latest_dates_tmp['upper_bound'] = pd.to_datetime(latest_dates_tmp['upper_bound'])
         latest_dates_tmp = latest_dates_tmp.rename(columns = {'Month': 'Latest_date'})
         print('UB:', latest_dates_tmp['upper_bound'])
@@ -679,14 +672,12 @@ class CreateDataset:
 
     def add_debits(self, result: pd.DataFrame):
         all_debits = self.collect_all_debits()
+        print(result.columns)
         latest_dates = result[['INN', 'upper_bound', 'Latest_date', 'start_date', '6m_date', '3m_date']]
         d_merged = pd.merge(all_debits, latest_dates, on='INN', how='inner')
-        d_last_12 = d_merged[d_merged['spec_date'].between(
-            d_merged['start_date'], d_merged['upper_bound'])]
-        d_last_6 = d_merged[d_merged['spec_date'].between(
-            d_merged['6m_date'], d_merged['upper_bound'])]
-        d_last_3 = d_merged[d_merged['spec_date'].between(
-            d_merged['3m_date'], d_merged['upper_bound'])]
+        d_last_12 = d_merged[d_merged['spec_date'].between(d_merged['start_date'], d_merged['upper_bound'])]
+        d_last_6 = d_merged[d_merged['spec_date'].between(d_merged['6m_date'], d_merged['upper_bound'])]
+        d_last_3 = d_merged[d_merged['spec_date'].between(d_merged['3m_date'], d_merged['upper_bound'])]
 
         d_last_12['debit'] = d_last_12['Всего'] - d_last_12['Период']
         d_last_6['debit'] = d_last_6['Всего'] - d_last_6['Период']
@@ -741,12 +732,12 @@ class CreateDataset:
             print('NO')
 
         contracts_df = self.get_contracts_first_dates()
-
         df = self._prepare_base_dataframe()
         df = self._add_activity_and_attrition(df)
-        df = self._add_date_bounds(df)
 
-        result = df.groupby('INN').apply(self._aggregate_client_data).reset_index()
+        # aggregate data from mixed analysis report:
+        df = df.groupby('INN').apply(self._aggregate_client_data).reset_index()
+        result = self._add_date_bounds(df)
 
         # Debug check
         if (result['INN'] == 9719032921).any():
@@ -761,6 +752,18 @@ class CreateDataset:
         result = self._add_contract_features(result, contracts_df)
         result = self._add_external_features(result)
 
+        processor = MailTagProcessor(
+            contacts_file='Список_16.06.2026.xlsx',
+            mail_file='mail_tagged.csv'
+        )
+        statistics = processor.run_pipeline(save=False)
+        result = create_attrition_features(
+            df_statistics=statistics,
+            df_clients=result,
+            inn_col='INN',
+            date_col='upper_bound'
+        )
+
         # Filter and save
         result, control_group_set = self.do_all_filtering(result)
         self._save_results(result, control_group_set)
@@ -768,7 +771,6 @@ class CreateDataset:
         return result
 
     def _prepare_base_dataframe(self):
-        """Load and prepare the base dataframe"""
         df = self.get_main_df()
         df = self.add_dates_and_bounds(df)
 
@@ -780,12 +782,32 @@ class CreateDataset:
         return df
 
     def _add_activity_and_attrition(self, df):
-        """Add activity and attrition flags to dataframe"""
         activity_and_attrition = df.groupby('INN').apply(
             lambda x: pd.Series({'ACTIVITY_AND_ATTRITION': self.is_inactive(x)})
         ).reset_index()
 
         df = pd.merge(df, activity_and_attrition, on='INN', how='left')
+
+        if self.edit_censored:
+            print('Editing censored data')
+            print(len(df[df['ACTIVITY_AND_ATTRITION']==1]))
+            df.loc[(df['ACTIVITY_AND_ATTRITION'] == 1) & (pd.to_datetime(df['Latest_date']) > self.test_dataset_snapshot_date), 'ACTIVITY_AND_ATTRITION'] = 0
+            print(len(df[df['ACTIVITY_AND_ATTRITION']==1]))
+
+        # mask_1 = df['ACTIVITY_AND_ATTRITION'] == 1
+        # df.loc[mask_1, 'upper_bound'] = df.loc[mask_1, 'Latest_date'].clip(
+        #     upper=self.data_load_date
+        # )
+
+        # Take horison into account:
+        if self.horison:
+            print('Using horison...')
+            print(len(df[df['ACTIVITY_AND_ATTRITION']==1]))
+            mask = (df['ACTIVITY_AND_ATTRITION'] == 1) & \
+                   (df['Latest_date'].dt.to_period('M') > df['upper_bound'].dt.to_period('M') + self.horison)
+            df.loc[mask, 'ACTIVITY_AND_ATTRITION'] = 0
+            print(len(df[df['ACTIVITY_AND_ATTRITION']==1]))
+
 
         # Debug print
         #mask_1 = df['ACTIVITY_AND_ATTRITION'] == 1
@@ -794,11 +816,6 @@ class CreateDataset:
         return df
 
     def _add_date_bounds(self, df):
-        """Add date boundaries and start dates"""
-        mask_1 = df['ACTIVITY_AND_ATTRITION'] == 1
-        df.loc[mask_1, 'upper_bound'] = df.loc[mask_1, 'Latest_date'].clip(
-            upper=self.data_load_date
-        )
         df['start_date'] = df['upper_bound'].apply(
             lambda x: x - pd.DateOffset(months=11)
         )
@@ -819,6 +836,7 @@ class CreateDataset:
                            x['Month'].min() < self.data_load_date)
 
         return pd.Series({
+            'ACTIVITY_AND_ATTRITION': x['ACTIVITY_AND_ATTRITION'].iloc[0],
             'sqm_sum': last_12_months['sqm'].sum(),
             'sqm_mean': last_12_months['sqm'].mean(),
             'sqm_median': last_12_months['sqm'].median(),
@@ -846,12 +864,10 @@ class CreateDataset:
             ),
             'Latest_date': x['Month'].max(),  # .strftime('%b-%y'),
             'First_date_from_reports': x['Month'].min(),  # It is clipped in the report by 01.01.2022!
-            'start_date': x['start_date'].iloc[0],
             'Price': (
                 last_12_months['Turnover'].sum() / last_12_months['sqm'].sum()
                 if has_valid_dates and last_12_months['sqm'].sum() > 0 else 0
             ),
-            'ACTIVITY_AND_ATTRITION': self.is_inactive(x),
             'Active_months': len(last_12_months['Month'].unique()),
             'Seasonality': self.is_seasonal(x),
             'upper_bound': x['upper_bound'].iloc[0],
@@ -906,7 +922,6 @@ class CreateDataset:
         )
         specs_last_12['spacetime_area_fraction'] /= specs_last_12['spacetime_area_fraction'].sum()
 
-        # Calculate various features
         specs_addresses = specs_last_12.groupby('INN').agg({
             'ADDRESS': lambda x: x.nunique()
         }).reset_index()
@@ -932,7 +947,6 @@ class CreateDataset:
                 result_weighted_changes]
 
     def _calculate_area(self, cr_size):
-        """Calculate area from CR_SIZE string"""
         try:
             width, height = map(int, cr_size.split('*'))
             return width * height
@@ -940,7 +954,6 @@ class CreateDataset:
             return 0
 
     def _add_trip_features(self, result):
-        """Add all trip-based features"""
         trips_df = self.load_trip_data('reports/Поездки')
         print(trips_df)
 
@@ -954,7 +967,6 @@ class CreateDataset:
             )
         ]
 
-        # Calculate trip features
         trips_drivers = trips_last_12.groupby('INN').agg({
             'DRIVER_FIO': lambda x: x.nunique()
         }).reset_index()
@@ -1032,21 +1044,23 @@ class CreateDataset:
 
 
 def main():
-    config = {
-        'cutoff_date': datetime(2026, 2, 28),
-        'cutoff_date_soft': datetime(2026, 3, 30),
-        'test_dataset_snapshot_date': datetime(2025, 5,
-                                              1),  # the border where test data starts. To take test attrition dates starting from this date
-        # The period to collect all the clients active for at least one day within
-        # (data_begin_date is not the bound for historical information retrieval):
-        'data_begin_date': datetime(2023, 5, 1),
-        'data_load_date': datetime(2024, 5, 1),
-        'edit_censored_data': True,
-        'randomize': True
-    }
-    cd = CreateDataset(config['data_begin_date'], config['data_load_date'], config['test_dataset_snapshot_date'],
-                       config['edit_censored_data'], config['cutoff_date'], config['cutoff_date_soft'], config['randomize'])
-    cd.create_dataset()
+    for m in range(2, 6):
+        config = {
+            'cutoff_date': datetime(2026, 2, 28),
+            'cutoff_date_soft': datetime(2026, 3, 30),
+            'test_dataset_snapshot_date': datetime(2025, 5,
+                                                  1),  # the border where test data starts. To take test attrition dates starting from this date
+            # The period to collect all the clients active for at least one day within
+            # (data_begin_date is not the bound for historical information retrieval):
+            'data_begin_date': datetime(2024, m, 1),
+            'data_load_date': datetime(2025, m-1, 28),
+            'edit_censored_data': True,
+            'horison': 6,  # months to predict ahead
+            'randomize': False
+        }
+        cd = CreateDataset(config['data_begin_date'], config['data_load_date'], config['test_dataset_snapshot_date'],
+                           config['edit_censored_data'], config['cutoff_date'], config['cutoff_date_soft'], config['horison'], config['randomize'])
+        cd.create_dataset()
 
 
 if __name__ == '__main__':
