@@ -81,18 +81,23 @@ class CreateDataset:
         return recalc_df
 
     def get_contracts_first_dates(self):
-        contracts_path = 'reports/Клиенты с датой контрактов.xlsx'
-        contracts_df = pd.read_excel(contracts_path, sheet_name='2022')
-        contracts_df['ИНН'] = contracts_df['ИНН'].apply(self.modify_inn).apply(self.match_inn)
+        contracts_path = 'reports/Список_16.06.2026.xlsx'
+        contracts_df = pd.read_excel(contracts_path)
+        contracts_df['Контрагент.ИНН'] = contracts_df['Контрагент.ИНН'].apply(self.modify_inn).apply(self.match_inn)
 
-        for year in ['2023', '2024', '2025']:
-            contracts_df_next = pd.read_excel(contracts_path, sheet_name=year)
-            contracts_df_next['ИНН'] = contracts_df_next['ИНН'].apply(self.modify_inn).apply(self.match_inn)
-            contracts_df = pd.concat([contracts_df, contracts_df_next])
+        # for year in ['2023', '2024', '2025', '2026']:
+        #     contracts_df_next = pd.read_excel(contracts_path, sheet_name=year)
+        #     contracts_df_next['Контрагент.ИНН'] = contracts_df_next['Контрагент.ИНН'].apply(self.modify_inn).apply(self.match_inn)
+        #     contracts_df = pd.concat([contracts_df, contracts_df_next])
 
-        contracts_df = contracts_df.rename(columns={'ИНН': 'INN'})
-        contracts_df['ДАТА КОНТРАКТА'] = pd.to_datetime(contracts_df['ДАТА КОНТРАКТА'])
-        contracts_df = contracts_df.groupby('INN')['ДАТА КОНТРАКТА'].min().reset_index()
+        contracts_df = contracts_df.rename(columns={'Контрагент.ИНН': 'INN'})
+        contracts_df['ДАТА КОНТРАКТА'] = pd.to_datetime(contracts_df['Дата'], dayfirst=True)
+        contracts_df['ДАТА ПЕРВОГО КОНТРАКТА'] = pd.to_datetime(contracts_df['Дата начала сотрудничества'])
+
+        contracts_df = contracts_df.groupby('INN').agg({
+            'ДАТА КОНТРАКТА': 'min',
+            'ДАТА ПЕРВОГО КОНТРАКТА': 'min'
+        }).reset_index()
         return contracts_df
 
     def add_rent_price(self, result):
@@ -144,6 +149,9 @@ class CreateDataset:
 
     def do_all_filtering(self, result):
         print(f'result len: {len(result)}')
+        result = result[result['Latest_date'] >= result['upper_bound']]
+        print(f'result len after filter (active at upper_bound): {len(result)}')
+
         result = result.loc[result['Latest_date'] >= self.data_begin_date]
         print(f'result len after filter 1: {len(result)}')
         if (result['INN'] == 9719032921).any():
@@ -183,7 +191,7 @@ class CreateDataset:
         result = result[(result['ACTIVITY_AND_ATTRITION']==0) | (result['Latest_date'] >= result['upper_bound'])]
         print(f'result len after filter 6: {len(result)}')
 
-        inns_list = pd.read_csv('new_control.csv')[
+        inns_list = pd.read_csv('new_control_final.csv')[
             'INN'].apply(self.modify_inn).apply(self.match_inn).tolist()  # Convert to list
 
         df_in_list = result[result['INN'].isin(inns_list)]  # Rows with INNs from Excel
@@ -503,20 +511,27 @@ class CreateDataset:
 
     def add_dates_and_bounds(self, _df: pd.DataFrame):
         latest_dates_tmp = _df.groupby('INN')['Month'].max().reset_index()
-        months = (self.data_load_date.year - self.data_begin_date.year) * 12 + (self.data_load_date.month - self.data_begin_date.month) + 1 if self.randomize else 1
-        random_dates = [
-            (self.data_load_date - pd.DateOffset(months=1) * np.random.randint(0, months)).replace(day=1)  # upper value not included in randint
-            for _ in range(len(latest_dates_tmp))
-        ]
-        random_dates = pd.DatetimeIndex(random_dates)    # Clip the values
-        latest_dates_tmp['upper_bound'] = latest_dates_tmp['Month'].clip(upper=random_dates)
-        latest_dates_tmp['upper_bound'] = pd.to_datetime(latest_dates_tmp['upper_bound'])
-        latest_dates_tmp = latest_dates_tmp.rename(columns = {'Month': 'Latest_date'})
-        print('UB:', latest_dates_tmp['upper_bound'])
+
+        if self.randomize: # NOT USED CURRENTLY
+            months = (self.data_load_date.year - self.data_begin_date.year) * 12 + \
+                     (self.data_load_date.month - self.data_begin_date.month) + 1
+            random_dates = [
+                (self.data_load_date - pd.DateOffset(months=1) * np.random.randint(0, months)).replace(day=1)
+                for _ in range(len(latest_dates_tmp))
+            ]
+            random_dates = pd.DatetimeIndex(random_dates)
+        else:
+            random_dates = pd.DatetimeIndex([
+                self.data_load_date.replace(day=1) for _ in range(len(latest_dates_tmp))
+            ])
+
+        latest_dates_tmp['upper_bound'] = random_dates
+        latest_dates_tmp = latest_dates_tmp.rename(columns={'Month': 'Latest_date'})
+
+        print('UB:', latest_dates_tmp['upper_bound'].unique())
 
         return _df.merge(latest_dates_tmp, on='INN')
 
-    # Функция для получения последних 12 месяцев для каждого ИНН
     def get_last_n_months(self, group, n):
         if len(group) == 0:
             return pd.DataFrame()
@@ -591,17 +606,28 @@ class CreateDataset:
                 ub = row['upper_bound']
                 temp = archive.loc[archive['year'].isin([ub.year, ub.year-1])]
                 temp_sum = 0
-                tems_sum_winter = 0
-                for m in range(1, ub.month+1):
-                    val = temp.loc[(temp['year'] == ub.year), m].item()
+                for i in range(6):  # last 6 months 'tail'
+                    if ub.month - i > 0:
+                        month = ub.month - i
+                        year = ub.year
+                    else:
+                        month = ub.month - i + 12
+                        year = ub.year - 1
+
+                    val = temp.loc[(temp['year'] == year), month].item()
                     temp_sum += val
+
+                # Calculate sum for last winter separately
+                tems_sum_winter = 0
+                for m in range(1, ub.month + 1):
+                    val = temp.loc[(temp['year'] == ub.year), m].item()
                     if m in [11, 12, 1, 2, 3]:
                         tems_sum_winter += val
-                for m in range(ub.month+1, 13):
-                    val = temp.loc[(temp['year'] == ub.year-1), m].item()
-                    temp_sum += val
+                for m in range(ub.month + 1, 13):
+                    val = temp.loc[(temp['year'] == ub.year - 1), m].item()
                     if m in [11, 12]:
                         tems_sum_winter += val
+
                 result.at[idx, 'weather_sum_' + str(n)] = temp_sum
                 result.at[idx, 'weather_avg_' + str(n)] = temp_sum / 12
                 result.at[idx, 'weather_winter_sum_' + str(n)] = tems_sum_winter
@@ -672,7 +698,6 @@ class CreateDataset:
 
     def add_debits(self, result: pd.DataFrame):
         all_debits = self.collect_all_debits()
-        print(result.columns)
         latest_dates = result[['INN', 'upper_bound', 'Latest_date', 'start_date', '6m_date', '3m_date']]
         d_merged = pd.merge(all_debits, latest_dates, on='INN', how='inner')
         d_last_12 = d_merged[d_merged['spec_date'].between(d_merged['start_date'], d_merged['upper_bound'])]
@@ -721,51 +746,70 @@ class CreateDataset:
         # Format results
         # merged_df['sum_recalculations'] = merged_df['sum_recalculations'].round(2)
         # result = pd.merge(result, merged_df, on='INN', how='left')
+
+        # result = self.merge_with_recalculations(result)
+        # if 'total_recalculations' in result.columns:
+        #     result['total_recalculations'] = result['total_recalculations'].fillna(0)
+        # if 'sum_recalculations' in result.columns:
+        #     result['sum_recalculations'] = result['sum_recalculations'].fillna(0)
+
         return result
 
     def create_dataset(self):
         """Main orchestrator method"""
-        specs_df = self.load_specifications_data('reports/Спецификации')
-        if (specs_df['INN'] == 9719032921).any():
-            print('YES')
-        else:
-            print('NO')
-
-        contracts_df = self.get_contracts_first_dates()
         df = self._prepare_base_dataframe()
+        print(f"После _prepare_base_dataframe: {df['INN'].nunique()} уникальных ИНН")
+
         df = self._add_activity_and_attrition(df)
+        print(f"После _add_activity_and_attrition: {df['INN'].nunique()} уникальных ИНН")
+        print(f"  Ушедших: {df['ACTIVITY_AND_ATTRITION'].sum()}")
+
+        # Анализ ушедших по датам
+        churned = df[df['ACTIVITY_AND_ATTRITION'] == 1]
+        if len(churned) > 0:
+            print(f"  Даты ухода ушедших:")
+            print(f"    До 2023: {(churned['Latest_date'] < '2023-01-01').sum()}")
+            print(
+                f"    2023: {((churned['Latest_date'] >= '2023-01-01') & (churned['Latest_date'] < '2024-01-01')).sum()}")
+            print(
+                f"    2024: {((churned['Latest_date'] >= '2024-01-01') & (churned['Latest_date'] < '2025-01-01')).sum()}")
+            print(f"    2025+: {(churned['Latest_date'] >= '2025-01-01').sum()}")
 
         # aggregate data from mixed analysis report:
         df = df.groupby('INN').apply(self._aggregate_client_data).reset_index()
+        print(f"После агрегации: {len(df)} клиентов")
+        print(f"  Ушедших: {df['ACTIVITY_AND_ATTRITION'].sum()}")
+
         result = self._add_date_bounds(df)
 
-        # Debug check
-        if (result['INN'] == 9719032921).any():
-            print('YES')
-        else:
-            print('NO')
-
         result = self.add_debits(result)
-        # Add all feature groups - pass specs_df to avoid reloading
-        result = self._add_specifications_features(result, specs_df)
-        result = self._add_trip_features(result)
-        result = self._add_contract_features(result, contracts_df)
-        result = self._add_external_features(result)
+        print(f"После add_debits: {len(result)} клиентов")
 
-        processor = MailTagProcessor(
-            contacts_file='Список_16.06.2026.xlsx',
-            mail_file='mail_tagged.csv'
-        )
-        statistics = processor.run_pipeline(save=False)
-        result = create_attrition_features(
-            df_statistics=statistics,
-            df_clients=result,
-            inn_col='INN',
-            date_col='upper_bound'
-        )
+        result = self._add_specifications_features(result)
+        print(f"После _add_specifications_features: {len(result)} клиентов")
+        print(f"  Ушедших: {result['ACTIVITY_AND_ATTRITION'].sum()}")
+
+        result = self._add_trip_features(result)
+        print(f"После _add_trip_features: {len(result)} клиентов")
+        print(f"  Ушедших: {result['ACTIVITY_AND_ATTRITION'].sum()}")
+
+        result = self._add_contract_features(result)
+        print(f"После _add_contract_features: {len(result)} клиентов")
+        print(f"  Ушедших: {result['ACTIVITY_AND_ATTRITION'].sum()}")
+
+        result = self._add_external_features(result)
+        print(f"После _add_external_features: {len(result)} клиентов")
+        print(f"  Ушедших: {result['ACTIVITY_AND_ATTRITION'].sum()}")
+
+        result = self._create_communication_features(result)
+        print(f"После _create_communication_features: {len(result)} клиентов")
+        print(f"  Ушедших: {result['ACTIVITY_AND_ATTRITION'].sum()}")
 
         # Filter and save
         result, control_group_set = self.do_all_filtering(result)
+        print(f"После фильтрации: {len(result)} клиентов")
+        print(f"  Ушедших: {result['ACTIVITY_AND_ATTRITION'].sum()}")
+
         self._save_results(result, control_group_set)
 
         return result
@@ -814,6 +858,19 @@ class CreateDataset:
         #print('\nLATEST DATES\n', df.loc[mask_1, 'Latest_date'])
 
         return df
+
+    def _create_communication_features(self, result):
+        processor = MailTagProcessor(
+            contacts_file='reports/Список_16.06.2026.xlsx',
+            mail_file='data_cur/mail_tagged_plus_llm.csv'
+        )
+        statistics = processor.run_pipeline(save=False)
+        return create_attrition_features(
+            df_statistics=statistics,
+            df_clients=result,
+            inn_col='INN',
+            date_col='upper_bound'
+        )
 
     def _add_date_bounds(self, df):
         df['start_date'] = df['upper_bound'].apply(
@@ -874,9 +931,12 @@ class CreateDataset:
             'legal_type': x['legal_type'].iloc[0],
         })
 
-    def _add_specifications_features(self, result, specs_df):
-        """Add all specification-based features"""
-        # Create latest dates reference
+    def _add_specifications_features(self, result):
+        specs_df = self.load_specifications_data('reports/Спецификации')
+        if (specs_df['INN'] == 9719032921).any():
+            print('YES')
+        else:
+            print('NO')
         latest_dates = result[['INN', 'upper_bound', 'Latest_date', 'start_date']]
 
         # Merge and filter specifications
@@ -901,6 +961,9 @@ class CreateDataset:
         else:
             print('\n!!!!IMPUTING 0 OF UNIQUE ADDRESSES!!!!\n')
             result['unique_addresses_last_12'] = 0
+
+        result['Frequency_of_changes_sum'] = result['Frequency_of_changes_sum'].replace(
+            [np.inf, -np.inf], 100)
 
         return result
 
@@ -955,7 +1018,6 @@ class CreateDataset:
 
     def _add_trip_features(self, result):
         trips_df = self.load_trip_data('reports/Поездки')
-        print(trips_df)
 
         latest_dates = result[['INN', 'upper_bound', 'Latest_date', 'start_date']]
 
@@ -991,15 +1053,20 @@ class CreateDataset:
 
         return result
 
-    def _add_contract_features(self, result, contracts_df):
-        """Add contract-related features"""
-        result = pd.merge(result, contracts_df, on='INN', how='inner')
+    def _add_contract_features(self, result):
+        contracts_df = self.get_contracts_first_dates()
+        result = pd.merge(result, contracts_df, on='INN', how='left')
+
+        result['ДАТА КОНТРАКТА'] = result['ДАТА КОНТРАКТА'].fillna(result['upper_bound'])
+        result['ДАТА ПЕРВОГО КОНТРАКТА'] = result['ДАТА ПЕРВОГО КОНТРАКТА'].fillna(result['First_date_from_reports'])
 
         result['Dur_months'] = (
-                                       result['upper_bound'] - result['ДАТА КОНТРАКТА']
+                                       result['upper_bound'] - result['ДАТА ПЕРВОГО КОНТРАКТА']
                                ).dt.days / 30.44
+        result['Dur_months_last_contract'] = (
+                                                     result['upper_bound'] - result['ДАТА КОНТРАКТА']
+                                             ).dt.days / 30.44
 
-        print(f'result: {result}')
         return result
 
     def _add_external_features(self, result):
@@ -1020,21 +1087,9 @@ class CreateDataset:
         else:
             print('NO before all filtering')
 
-        # Handle recalculations if present
-        # result = self.merge_with_recalculations(result)
-        if 'total_recalculations' in result.columns:
-            result['total_recalculations'] = result['total_recalculations'].fillna(0)
-        if 'sum_recalculations' in result.columns:
-            result['sum_recalculations'] = result['sum_recalculations'].fillna(0)
-
-        result['Frequency_of_changes_sum'] = result['Frequency_of_changes_sum'].replace(
-            [np.inf, -np.inf], 100
-        )
-
         return result
 
     def _save_results(self, result, control_group_set):
-        """Save results to CSV files"""
         # control_group_set.to_csv('data/control_v9.csv')
 
         result.to_csv(
@@ -1044,19 +1099,19 @@ class CreateDataset:
 
 
 def main():
-    for m in range(2, 6):
+    for m in range(1, 8):
         config = {
             'cutoff_date': datetime(2026, 2, 28),
             'cutoff_date_soft': datetime(2026, 3, 30),
-            'test_dataset_snapshot_date': datetime(2025, 5,
+            'test_dataset_snapshot_date': datetime(2026, 5,
                                                   1),  # the border where test data starts. To take test attrition dates starting from this date
             # The period to collect all the clients active for at least one day within
             # (data_begin_date is not the bound for historical information retrieval):
-            'data_begin_date': datetime(2024, m, 1),
-            'data_load_date': datetime(2025, m-1, 28),
+            'data_begin_date': datetime(2023, m+1, 1),
+            'data_load_date': datetime(2024, m, 1),
             'edit_censored_data': True,
             'horison': 6,  # months to predict ahead
-            'randomize': False
+            'randomize': False # Now always False
         }
         cd = CreateDataset(config['data_begin_date'], config['data_load_date'], config['test_dataset_snapshot_date'],
                            config['edit_censored_data'], config['cutoff_date'], config['cutoff_date_soft'], config['horison'], config['randomize'])
