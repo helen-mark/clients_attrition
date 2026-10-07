@@ -1,6 +1,8 @@
 import csv
 from datetime import datetime, timedelta
 from datetime import date
+from pathlib import Path
+
 from dateutil.relativedelta import relativedelta
 import glob
 from io import StringIO
@@ -12,6 +14,39 @@ import pandas as pd
 from create_tags_statistics_per_INN import MailTagProcessor, create_attrition_features
 
 # for file in *Август2025_Москва.csv; do     echo "Converting $file to UTF-8...";     iconv -f cp1251 -t utf-8 "$file" > "${file%.csv}_utf8.csv"; done
+class CommunicationFeatureBuilder:
+    def __init__(self,
+                 mapping_file='data_cur/mapping/merged.csv',
+                 mail_file='data_cur/mail_tagged_plus_llm.csv',
+                 calls_file='data_cur/calls_plus_llm.csv',
+                 statistics_cache='artifacts/tag_statistics.parquet'):
+        self._cache_path = Path(statistics_cache)
+        self._processor_kwargs = dict(
+            mapping_file=mapping_file,
+            mail_file=mail_file,
+            calls_file=calls_file,
+        )
+        self._engineer = None
+        self._statistics = None
+
+    def _ensure_statistics(self):
+        if self._statistics is not None:
+            return
+        if self._cache_path.exists():
+            self._statistics = pd.read_parquet(self._cache_path)
+        else:
+            processor = MailTagProcessor(**self._processor_kwargs)
+            self._statistics = processor.run_pipeline(save=False)
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._statistics.to_parquet(self._cache_path, index=False)
+        self._engineer = MailTagFeatureEngineer(self._statistics)
+
+    def create_features(self, result: pd.DataFrame) -> pd.DataFrame:
+        self._ensure_statistics()
+        return self._engineer.create_base_features(
+            df_clients=result, inn_col='INN', date_col='upper_bound'
+        )
+
 
 class CreateDataset:
     def __init__(self, data_begin_date, data_load_date, test_dataset_snapshot_date, edit_censored, cutoff_date, cutoff_soft, horison, randomize):
@@ -23,6 +58,8 @@ class CreateDataset:
         self.cutoff_soft = cutoff_soft
         self.horison = horison
         self.randomize = randomize
+
+        self._comm_builder = CommunicationFeatureBuilder()
 
         self.renaming_df = pd.read_csv('reports/Переименования/rename_report.csv', delimiter=';', quotechar='"')
         self.renaming_df['OLD_INN'] = self.renaming_df['OLD_INN'].apply(self.modify_inn)
@@ -859,18 +896,11 @@ class CreateDataset:
 
         return df
 
+
+    # один раз на весь прогон / процесс
     def _create_communication_features(self, result):
-        processor = MailTagProcessor(
-            contacts_file='reports/Список_16.06.2026.xlsx',
-            mail_file='data_cur/mail_tagged_plus_llm.csv'
-        )
-        statistics = processor.run_pipeline(save=False)
-        return create_attrition_features(
-            df_statistics=statistics,
-            df_clients=result,
-            inn_col='INN',
-            date_col='upper_bound'
-        )
+
+        return self._comm_builder.create_features(result)
 
     def _add_date_bounds(self, df):
         df['start_date'] = df['upper_bound'].apply(
