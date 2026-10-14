@@ -19,44 +19,6 @@ from sdv.metadata import Metadata
 from sdv.single_table import CTGANSynthesizer, TVAESynthesizer, CopulaGANSynthesizer
 
 
-def dataframe_to_dataset(dataframe: pd.DataFrame):
-    dataframe = dataframe.copy()
-    labels = dataframe.pop("status")
-    ds = tf.data.Dataset.from_tensor_slices((dict(dataframe), labels))
-    ds = ds.shuffle(buffer_size=len(dataframe), seed=43)
-    return ds
-
-
-def encode_numerical_feature(feature: K.Input, name: str, dataset: tf.data.Dataset):  # numerical features like age, salary etc
-    # Create a Normalization layer for our feature
-    normalizer = K.layers.Normalization()
-
-    # Prepare a Dataset that only yields our feature
-    feature_ds = dataset.map(lambda x, y: x[name])
-    feature_ds = feature_ds.map(lambda x: tf.expand_dims(x, -1))
-
-    normalizer.adapt(feature_ds)
-
-    # Normalize the input feature
-    encoded_feature = normalizer(feature)
-    return encoded_feature
-
-
-def encode_categorical_feature(feature: K.Input, name: str, dataset: tf.data.Dataset, is_string: bool):  # categorical features like sex, family status etc
-    lookup_class = K.layers.StringLookup if is_string else K.layers.IntegerLookup
-    lookup = lookup_class(output_mode="binary")
-
-    # Prepare a Dataset that only yields our feature
-    feature_ds = dataset.map(lambda x, y: x[name])
-    feature_ds = feature_ds.map(lambda x: tf.expand_dims(x, -1))
-
-    # Learn the set of possible string values and assign them a fixed integer index
-    lookup.adapt(feature_ds)
-
-    # Turn the string input into integer indices
-    encoded_feature = lookup(feature)
-    return encoded_feature
-
 def minority_class_resample(_dataset: pd.DataFrame, _cat_feat: list):
     print("Smote application", _dataset.columns)
     categorical_indices = [i for i, col in enumerate(_dataset.columns) if col in _cat_feat]
@@ -80,53 +42,31 @@ def collect_datasets(_data_path: str, _eliminate_june: bool = False):
             continue
         dataset_path = os.path.join(_data_path, filename)
         print(filename)
-        dataset = pd.read_csv(dataset_path)
+        dataset = pd.read_csv(dataset_path, low_memory=False)
         if _eliminate_june:
             dataset['upper_bound'] = pd.to_datetime(dataset['upper_bound'])
             dataset = dataset[~((dataset['upper_bound'].dt.month == 6) & (dataset['upper_bound'].dt.year == 2025))]
-        print("cols before", dataset.columns)
-        strings_to_drop = ['city', 'latest', 'Latest', 'First_date', 'First date', 'start_date', 'ДАТА', 'upper_b', 'Unnamed', 'Знач', 'FIO',# 'AVG_P', 'MEDIAN_P',
+        #print("cols before", dataset.columns)
+        # dataset['season'] = pd.to_datetime(dataset['upper_bound']).dt.month.map(
+        #     {1: 'Winter', 2: 'Winter', 3: 'Spring', 4: 'Spring', 5: 'Spring',
+        #      6: 'Summer', 7: 'Summer', 8: 'Summer', 9: 'Autumn', 10: 'Autumn', 11: 'Autumn', 12: 'Winter'})
+        strings_to_drop = ['city', 'latest', 'Latest', 'ai rct', 'First_date', '6m_date', '3m_date', 'First date', 'start_date', 'ДАТА', 'upper_b', 'Unnamed', 'Знач', 'FIO',# 'AVG_P', 'MEDIAN_P',
                            #'Обор', 'Коэф', 'Рент',
                           #'SQM_SINGLE_MATS_IN_ACTIVE_SPECIFICATIONS',
-                           'sum_recalculations', 'er_avg_0', 'er_avg_1', 'weather_avg_', 'winter_sum_1', 'AVG_PRICE_', 'MEDIAN_PRICE_',
-                           'undelivered', 'Entity', 'kbk', 'code', # 'Tax', 'tax', 'Fines', 'Arrears', 'Penalti',
+                           'er_avg_0',  'weather_avg_', 'winter_avg', 'расторжение договора', 'клиент уходит', 'recalc', 'weather_sum_', 'TaxPaid', 'n_debit',
+                           'Entity', 'kbk', 'code', # 'Tax', 'tax', 'Fines', 'Arrears', 'Penalti',
+                           'Reason', 'Satisf',
                            #'weather',
                            #'address',
-                        'aaaaaaaaaasqm_sum']  #, 'sqm_mean']
+                        'aasqm_sum']  #, 'sqm_mean']
         dataset = dataset.drop(
             columns=[c for c in dataset.columns if any(string in c for string in strings_to_drop)])
         dataset = dataset.sort_index(axis=1)
-        print("cols after", dataset.columns)
+        #print("cols after", dataset.columns)
         dataset = shuffle(dataset, random_state=4242)
         datasets.append(dataset)
     return datasets
 
-
-def DataFilter(x, y):  # remove samples with 0 days before salary increase (as an experiment)
-    return x['days_before_salary_increase'] > 0
-
-
-def create_dataset(_dataset: pd.DataFrame, _dataset_val: pd.DataFrame, _batch_size: int):
-    print(
-        f"Using {len(_dataset)} samples for training "
-        f"and {len(_dataset_val)} for validation"
-    )
-
-    train_ds = dataframe_to_dataset(_dataset)
-    val_ds = dataframe_to_dataset(_dataset_val)
-    val_ds_2 = dataframe_to_dataset(_dataset_val)
-    print("B", len(list(train_ds.as_numpy_iterator())))
-
-    # train_ds = train_ds.filter(DataFilter)
-    # val_ds = val_ds.filter(DataFilter)
-    # val_ds_2 = val_ds.filter(DataFilter)
-
-
-    print("A", len(list(train_ds.as_numpy_iterator())))
-
-    train_ds = train_ds.batch(_batch_size)
-    val_ds = val_ds.batch(_batch_size)
-    return train_ds, val_ds, val_ds_2, _dataset, _dataset_val
 
 def make_synthetic(_dataset: pd.DataFrame, _size: int, _type: str = 'sdv'):
     if _type == 'sdv':
@@ -214,20 +154,6 @@ def encode_categorical(_dataset: pd.DataFrame, _encoder: OneHotEncoder, _cat_fea
     numerical_part = _dataset.drop(columns=_cat_features)
     return pd.concat([encoded_df, numerical_part], axis=1), encoded_df
 
-
-def get_united_dataset(_d_train: list, _d_val: list, _d_test: list):
-    trn = pd.concat(_d_train, axis=0)
-    vl = pd.concat(_d_val, axis=0)
-
-    trn = trn.transpose()
-    vl = vl.transpose()
-
-    x_train = trn[:-1].transpose()
-    x_val = vl[:-1].transpose()
-    y_train = trn[-1:].transpose()
-    y_val = vl[-1:].transpose()
-    return x_train, y_train, x_val, y_val
-
 def get_split(_dataset: pd.DataFrame, _test_split: float, _split_state: int):
     # val = _dataset.sample(frac=_test_split, random_state=_split_state)
     # test = val  # .sample(frac=0.3, random_state=_split_rand_state)
@@ -282,7 +208,7 @@ def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, 
     #         sample_df, _ = encode_categorical(sample_df, encoder)
 
     trn1 = _datasets[1]
-    trn2 = pd.concat([_datasets[2], _datasets[3]])
+    trn2 = pd.concat(_datasets[2:])
     #trn3 = _datasets[3]
     tst = _datasets[0]  # pd.concat([_datasets[0], _datasets[3]]).reset_index(drop=True)
 
@@ -345,7 +271,8 @@ def add_quality_features(df: pd.DataFrame, _total_ds: pd.DataFrame):
     df['Turnover_mean_last_12'] = df['Turnover_sum_last_12'] / df['Active_months']
     df['sqm_mean'] = df['sqm_sum'] / df['Active_months']
     df['Frequency_of_changes_mean'] = df['Frequency_of_changes_sum'] / df['Active_months']
-    df['n_recalculations_mean'] = df['total_recalculations'] / df['Active_months']
+    if 'total_recalculations' in df.columns:
+        df['n_recalculations_mean'] = df['total_recalculations'] / df['Active_months']
     df = df.replace([np.nan, pd.NA], 0)
     # lets try calculate ball derivative:
     for col in df.columns:
@@ -394,6 +321,9 @@ def add_quality_features(df: pd.DataFrame, _total_ds: pd.DataFrame):
 
 #    df['DRIVER_FIO'] = df['DRIVER_FIO'].where(df['DRIVER_FIO'].map(df['DRIVER_FIO'].value_counts()) > 10, 'Other').astype('str')
     df['tenure_adjusted_activity'] = df['Active_months'] / df['Dur_months']
+#    df['debit_rate'] = df['sum_debits_12'] / df['Turnover_sum_last_12']
+ #   df['debit_rate_deriv'] = (df['sum_debits_3'] / df['Turnover_3']) - (df['sum_debits_6'] / df['Turnover_6'])
+
 
     #df['sum_recalculations'] = df['sum_recalculations'] / df['Active_months']
     # df['total_spacetime_area_normalized'] = df['total_spacetime_area'] * 100 / df['total_spacetime_area'].sum()
@@ -407,9 +337,42 @@ def add_quality_features(df: pd.DataFrame, _total_ds: pd.DataFrame):
             calculated_cat_feat.append(c)
     #df['turnover_vs_seasonality'] = df['turnover_group'].astype('str') + '_' + df['Seasonality'].astype('str')
     df['carpet_area'] = df['sqm_sum'] / (df['Frequency_of_changes_sum'])
-    df = df.drop(columns=['Frequency_of_changes_sum', 'Turnover_sum_last_12', 'total_recalculations', 'sqm_sum'])
+    df = df.drop(columns=['Frequency_of_changes_sum', 'Turnover_sum_last_12', 'total_recalculations', 'sqm_sum'], errors='ignore')
+    # important_feat = ['last_3m_клиент просит заменять ковры чаще',
+    # 'last_6m_vs_prev_6m_клиент уходит к конкурентам_diff',
+    # 'last_3m_vs_prev_3m_клиент хочет меньше ковров_diff',
+    # 'last_6m_vs_prev_6m_приостановить услуги_diff',
+    # 'last_3m_max_gap_months',
+    # 'Turnover_deriv_1',
+    # 'last_1m_avg_monthly_tags',
+    # 'last_year_avg_monthly_tags',
+    # 'last_12m_frequency',
+    # 'weather_winter_avg_1',
+    # 'last_3m_tag_entropy',
+    # 'activity_decay_1m_vs_3m',
+    # 'tenure_adjusted_activity',
+    # 'Firm_age_months',
+    # 'relationship_duration_days',
+    # 'last_12m_unique_tags',
+    # 'sqm_median',
+    # 'sqm_deriv_1',
+    # 'has_communication_last_60d',
+    # 'IPP',
+    # 'Founders Count',
+    # 'Frequency_of_changes_mean',
+    # 'carpet_area',
+    # 'months_since_last_communication',
+    # 'Active_months',
+    # 'Seasonality',
+    # 'legal_type',
+    # 'AVG_PRICE',
+    # 'ACTIVITY_AND_ATTRITION',
+    # 'Dur_months',
+    # 'MEDIAN_PRICE']
+    # df = df.drop(columns=[c for c in df.columns if c not in important_feat], errors='ignore')
 
     new_columns = set(df.columns) - set(original_types.index)
+    #new_columns.add('season')
     calculated_cat_feat.extend([
         col for col in new_columns
         if pd.api.types.is_string_dtype(df[col])  # Checks if dtype is string/object
@@ -443,5 +406,6 @@ def create_features_for_datasets(_datasets: list, _config):
         d, new_cat_feat = add_quality_features(d, tot_ds.reset_index())
         cols = d.columns.tolist()
         d = d[cols]
+        #d = d.drop(columns=['Active_months'])
         improved_datasets.append(d)
     return improved_datasets, new_cat_feat

@@ -103,18 +103,18 @@ def train_catboost(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_fe
     # model already initialized with latest version of optimized parameters for our dataset
 
     model = CatBoostClassifier(
-        iterations=962, #400  # Fewer trees + early stopping
-        learning_rate=0.1,  #0.08,  # Smaller steps for better generalization
-        depth=6,
-        l2_leaf_reg=10, #10,  # Stronger L2 regularization
-        bootstrap_type='MVS',
-        # bagging_temperature=1,  # Less aggressive subsampling
-        random_strength=1,  # Default randomness
-        loss_function='Logloss',
-        eval_metric='AUC',
-        auto_class_weights='Balanced',  # Adjust for class imbalance
-        od_type='Iter',  # Early stopping
-        od_wait=51,  # Patience before stopping
+        # iterations=562, #400  # Fewer trees + early stopping
+        # learning_rate=0.075,  #0.08,  # Smaller steps for better generalization
+        # depth=6,
+        # l2_leaf_reg=5, #10,  # Stronger L2 regularization
+        # bootstrap_type='MVS',
+        # # bagging_temperature=1,  # Less aggressive subsampling
+        # random_strength=1,  # Default randomness
+        # loss_function='Logloss',
+        # eval_metric='AUC',
+        # auto_class_weights='Balanced',  # Adjust for class imbalance
+        # od_type='Iter',  # Early stopping
+        # od_wait=51,  # Patience before stopping
     )
     #CatBoostClassifier._clear_training_state()  # Critical for looped execution
 
@@ -344,15 +344,7 @@ def train_random_forest_cls(_x_train, _y_train, _x_test, _y_test, _sample_weight
 
 
 def train(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_feats_encoded, _model_name, _num_iters):
-    if _model_name == 'XGBoostClassifier':
-        model = train_xgboost_classifier(_x_train, _y_train, _x_test, _y_test, _sample_weight, _num_iters)
-    elif _model_name == 'RandomForestRegressor':
-        model = train_random_forest_regr(_x_train, _y_train, _x_test, _y_test, _sample_weight, _num_iters)
-    elif _model_name == 'TabNet':
-        model = train_tabnet(_x_train, _y_train, _x_test, _y_test, _sample_weight)
-    elif _model_name == "RandomForestClassifier":
-        model = train_random_forest_cls(_x_train, _y_train, _x_test, _y_test, _sample_weight, _num_iters)
-    elif _model_name == "CatBoostClassifier":
+    if _model_name == "CatBoostClassifier":
         model = train_catboost(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_feats_encoded, _num_iters)
     else:
         print("Model name error: this model is not implemented yet!")
@@ -583,7 +575,7 @@ def test_with_slices(_model, trn, trg, target_positive_rates=[0.03, 0.1, 0.2]):
 
 
 
-def test(_model, trn, trg, target_positive_rates=[0.03, 0.1, 0.2]):
+def test(_model, trn, trg, target_positive_rates=[0.20]):
     # --- Разворачиваем bundle: (model + calibration_scale) или чистую модель ---
     if isinstance(_model, dict):
         scale = _model.get('calibration_scale', 1.0)
@@ -733,7 +725,10 @@ def remove_outliers(dfs):
     features_to_trim = [
         c for c in dfs[0].columns if
         'AVG_PRICE' in c or
-        'MEDIAN_PRICE' in c
+        'MEDIAN_PRICE' in c or
+        'Price' in c or
+        'Turnover' in c or
+        'Dur_months' in c
     ]
     if not any(feature in dfs[0].columns for feature in features_to_trim):
         return dfs
@@ -780,7 +775,7 @@ def filter_by_attrition_reason(df):
 def remove_non_addressable(df):
     print('-'*50)
     print("Before removing non-addressable:", len(df[df['ACTIVITY_AND_ATTRITION']==1]))
-    addressable_df = pd.read_csv('data_cur/mapping/merged.csv')
+    addressable_df = pd.read_excel('reports/Причины оттока.xlsx')  #('data_cur/mapping/merged.csv')
 
     def normalize_inn(series):
         # приводим к строке, убираем .0, пробелы и т.п.
@@ -792,7 +787,7 @@ def remove_non_addressable(df):
         )
 
     addressable_inns = set(
-        normalize_inn(addressable_df.loc[addressable_df['Addressable'] == 0, 'INN'])
+        normalize_inn(addressable_df.loc[addressable_df['Addressable'] == 'Non actionable', 'INN'])
     )
 
     mask = normalize_inn(df['INN']).isin(addressable_inns)
@@ -886,6 +881,9 @@ def main(_config: dict):
 
         d_train = d_train[d_train['Dur_months'] >= 12].copy()
         d_test  = d_test[d_test['Dur_months'] >= 12].copy()
+        #d_train = d_train.drop(columns=['Dur_months'], errors='ignore')
+        #d_test = d_test.drop(columns=['Dur_months'], errors='ignore')
+
 
         x_train = d_train.drop('ACTIVITY_AND_ATTRITION', axis=1)
         y_train = d_train['ACTIVITY_AND_ATTRITION']
@@ -928,9 +926,9 @@ def main(_config: dict):
             pickle.dump({'model': trained_model, 'calibration_scale': scale}, f)
 
         print('Metrics on TEST set:')
-        f1, r, p = test(trained_model, x_val, y_val)
+        test(trained_model, x_val, y_val)
 
-    return r, p
+    return
 
 
 def train_model(config):
@@ -975,13 +973,13 @@ if __name__ == '__main__':
         'make_synthetic': None,  # options: 'sdv', 'ydata', None
         'smote': False,  # perhaps not needed for catboost and in case if minority : majority > 0.5
         'cat_features': ['Seasonality', 'legal_type'],  # , 'legal_type']  # , 'DRIVER_FIO', 'Entity Type', 'taxcode']  #, 'kbktax', 'kbknametax']  #, 'occupational_hazards']
-        'use_mail_metrics': True,
+        'use_mail_metrics': False,
         'filter_by_attrition_reason': False,
-        'remove_non_addressable': True
+        'remove_non_addressable': False
     }
 
     # Use context manager for proper resource cleanup
-    r, p = main(config)
+    main(config)
 
 
 # 97d0ae93-9dfc-4c2a-9183-a0420a4d0771

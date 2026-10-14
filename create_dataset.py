@@ -11,7 +11,8 @@ import openpyxl
 import os
 import pandas as pd
 
-from create_tags_statistics_per_INN import MailTagProcessor, create_attrition_features
+from create_tags_statistics_per_INN import MailTagProcessor, create_attrition_features, MailTagFeatureEngineer
+
 
 # for file in *Август2025_Москва.csv; do     echo "Converting $file to UTF-8...";     iconv -f cp1251 -t utf-8 "$file" > "${file%.csv}_utf8.csv"; done
 class CommunicationFeatureBuilder:
@@ -28,19 +29,84 @@ class CommunicationFeatureBuilder:
         )
         self._engineer = None
         self._statistics = None
+        # источники, от которых зависит кэш — если любой новее кэша,
+        # кэш инвалидируется
+        self._source_files = [
+            Path(mapping_file),
+            Path(mail_file),
+            Path(calls_file),
+        ]
+        # путь к модулю-процессору — тоже инвалидируем, если он изменился
+        try:
+            self._processor_file = Path(__file__).resolve()
+        except NameError:
+            self._processor_file = None
+
+    # ---------------------------------------------------------------- cache
+    def _cache_is_fresh(self) -> bool:
+        if not self._cache_path.exists():
+            return False
+        cache_mtime = self._cache_path.stat().st_mtime
+
+        # все источники должны существовать и быть старше кэша
+        for src in self._source_files:
+            if not src.exists():
+                # если источника нет — доверяем кэшу (например, при инференсе)
+                continue
+            if src.stat().st_mtime > cache_mtime:
+                print(f"[cache] инвалидация: {src} новее кэша")
+                return False
+
+        # код процессора тоже мог измениться
+        if self._processor_file is not None and self._processor_file.exists():
+            if self._processor_file.stat().st_mtime > cache_mtime:
+                print(f"[cache] инвалидация: код {self._processor_file.name} новее кэша")
+                return False
+        return True
 
     def _ensure_statistics(self):
         if self._statistics is not None:
             return
-        if self._cache_path.exists():
+
+        if self._cache_is_fresh():
+            print(f"[cache] читаем статистику из {self._cache_path}")
             self._statistics = pd.read_parquet(self._cache_path)
         else:
+            print("[cache] пересчитываем статистику заново...")
             processor = MailTagProcessor(**self._processor_kwargs)
             self._statistics = processor.run_pipeline(save=False)
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
             self._statistics.to_parquet(self._cache_path, index=False)
+            print(f"[cache] сохранено в {self._cache_path}")
+
+        # нормализация ИНН на стороне статистики (на всякий случай ещё раз)
+        if 'ИНН' in self._statistics.columns:
+            self._statistics['ИНН'] = (
+                self._statistics['ИНН'].astype(str)
+                .str.strip()
+                .str.split('.').str[0]
+                .str.split(' ').str[0]
+            )
+
+        # диагностика
+        self._print_diagnostics()
+
         self._engineer = MailTagFeatureEngineer(self._statistics)
 
+    def _print_diagnostics(self):
+        try:
+            inns = self._statistics['ИНН'].astype(str)
+            print(f"[diag] tag_stats: строк={len(self._statistics)}, "
+                  f"уникальных ИНН={inns.nunique()}, "
+                  f"пример={inns.head(3).tolist()}")
+            if 'Год-Месяц' in self._statistics.columns:
+                print(f"[diag] tag_stats период: "
+                      f"{self._statistics['Год-Месяц'].min()} .. "
+                      f"{self._statistics['Год-Месяц'].max()}")
+        except Exception as e:
+            print(f"[diag] не удалось вывести диагностику: {e}")
+
+    # ---------------------------------------------------------------- public
     def create_features(self, result: pd.DataFrame) -> pd.DataFrame:
         self._ensure_statistics()
         return self._engineer.create_base_features(
@@ -792,6 +858,34 @@ class CreateDataset:
 
         return result
 
+    def add_communication_feats_only(self, dataset_dir):
+        """Add features from emails and calls to the existing datasets"""
+        for filename in os.listdir(dataset_dir):
+            if not filename.endswith('.csv'):
+                continue
+            file_path = os.path.join(dataset_dir, filename)
+            print(f"\n=== {filename} ===")
+
+            df = pd.read_csv(file_path)
+            print(f"Загружено строк: {len(df)}; "
+                  f"уникальных ИНН: {df['INN'].nunique() if 'INN' in df.columns else 'НЕТ КОЛОНКИ INN'}")
+
+            result = self._create_communication_features(df)
+
+            # диагностика: сколько фичей ненулевые
+            feat_cols = [c for c in result.columns if c not in df.columns]
+            if feat_cols:
+                nonzero = (result[feat_cols].fillna(0) != 0).any(axis=0).sum()
+                print(f"Новых колонок: {len(feat_cols)}; "
+                      f"из них ненулевых хотя бы у одного клиента: {nonzero}")
+
+            # записываем во временный файл и заменяем только при успехе
+            tmp_path = file_path + '.tmp'
+            result.to_csv(tmp_path, index=False)
+            os.replace(tmp_path, file_path)
+            print(f"Записано: {file_path}")
+
+
     def create_dataset(self):
         """Main orchestrator method"""
         df = self._prepare_base_dataframe()
@@ -1129,7 +1223,7 @@ class CreateDataset:
 
 
 def main():
-    for m in range(1, 8):
+    for m in range(1, 10):
         config = {
             'cutoff_date': datetime(2026, 2, 28),
             'cutoff_date_soft': datetime(2026, 3, 30),
@@ -1137,15 +1231,17 @@ def main():
                                                   1),  # the border where test data starts. To take test attrition dates starting from this date
             # The period to collect all the clients active for at least one day within
             # (data_begin_date is not the bound for historical information retrieval):
-            'data_begin_date': datetime(2023, m+1, 1),
-            'data_load_date': datetime(2024, m, 1),
-            'edit_censored_data': True,
+            'data_begin_date': datetime(2024, min(m+1, 12), 1),
+            'data_load_date': datetime(2025, m, 1),
+            'edit_censored_data': False,
             'horison': 6,  # months to predict ahead
             'randomize': False # Now always False
         }
         cd = CreateDataset(config['data_begin_date'], config['data_load_date'], config['test_dataset_snapshot_date'],
                            config['edit_censored_data'], config['cutoff_date'], config['cutoff_date_soft'], config['horison'], config['randomize'])
         cd.create_dataset()
+
+        #cd.add_communication_feats_only(dataset_dir = 'data/v26')
 
 
 if __name__ == '__main__':
