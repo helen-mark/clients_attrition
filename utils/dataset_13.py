@@ -53,12 +53,9 @@ def collect_datasets(_data_path: str, _eliminate_june: bool = False):
         strings_to_drop = ['city', 'latest', 'Latest', 'ai rct', 'First_date', '6m_date', '3m_date', 'First date', 'start_date', 'ДАТА', 'upper_b', 'Unnamed', 'Знач', 'FIO',# 'AVG_P', 'MEDIAN_P',
                            #'Обор', 'Коэф', 'Рент',
                           #'SQM_SINGLE_MATS_IN_ACTIVE_SPECIFICATIONS',
-                           'er_avg_0',  'weather_avg_', 'winter_avg', 'расторжение договора', 'клиент уходит', 'recalc', 'weather_sum_', 'TaxPaid', 'n_debit',
+                           'weather_avg_', 'winter_avg','recalc', 'TaxPaid', 'n_debit', 'last_contract', 'under_comp',
                            'Entity', 'kbk', 'code', # 'Tax', 'tax', 'Fines', 'Arrears', 'Penalti',
-                           'Reason', 'Satisf',
-                           #'weather',
-                           #'address',
-                        'aasqm_sum']  #, 'sqm_mean']
+                           'Reason', 'Satisf']
         dataset = dataset.drop(
             columns=[c for c in dataset.columns if any(string in c for string in strings_to_drop)])
         dataset = dataset.sort_index(axis=1)
@@ -150,7 +147,7 @@ def make_sdv(_dataset: pd.DataFrame, _size: int = 1000):
 
 def encode_categorical(_dataset: pd.DataFrame, _encoder: OneHotEncoder, _cat_features: list):
     encoded_features = _encoder.transform(_dataset[_cat_features]).toarray().astype(int)
-    encoded_df = pd.DataFrame(encoded_features, columns=_encoder.get_feature_names_out(_cat_features))
+    encoded_df = pd.DataFrame(encoded_features, columns=_encoder.get_feature_names_out(_cat_features), index=_dataset.index)
     numerical_part = _dataset.drop(columns=_cat_features)
     return pd.concat([encoded_df, numerical_part], axis=1), encoded_df
 
@@ -188,10 +185,10 @@ def normalize(_data: pd.DataFrame, cat_features: list = None):
     )
     return _data_normalized
 
-def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, _encode_categorical: bool, _cat_feat: list, _split_rand_state: int):
+def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, _encode_categorical: bool, _cat_feat: list, _split_rand_state: int, _validation_dataset=None):
     if _encode_categorical:
-        concat_dataset = pd.concat(_datasets)
-        encoder = OneHotEncoder()
+        concat_dataset = pd.concat(_datasets[1:])
+        encoder = OneHotEncoder(handle_unknown='ignore')
         encoder.fit(concat_dataset[_cat_feat])
 
     # if _make_synthetic is not None:
@@ -207,20 +204,21 @@ def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, 
     #     if _encode_categorical:
     #         sample_df, _ = encode_categorical(sample_df, encoder)
 
-    trn1 = _datasets[1]
-    trn2 = pd.concat(_datasets[2:])
+    trn1 = pd.concat(_datasets[1:])
     #trn3 = _datasets[3]
     tst = _datasets[0]  # pd.concat([_datasets[0], _datasets[3]]).reset_index(drop=True)
 
     if _normalize:
         print('Performing normalization...')
         trn1 = normalize(trn1, _cat_feat)
-        trn2 = normalize(trn2, _cat_feat)
         #trn3 = normalize(trn3, _cat_feat)
 
         tst = normalize(tst, _cat_feat)
+        if _validation_dataset is not None:
+            _validation_dataset = normalize(_validation_dataset, _cat_feat)
 
-    trn = pd.concat([trn1, trn2]).reset_index().drop(columns=['index'])
+    trn = trn1.reset_index(drop=True)
+    cat_feature_names = []
     rows_1 = trn[trn['ACTIVITY_AND_ATTRITION'] == 1]
     rows_2 = trn[trn['ACTIVITY_AND_ATTRITION'] == 0] #.sample(n=3500)
     trn = pd.concat([rows_1, rows_2]).reset_index()
@@ -239,6 +237,8 @@ def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, 
         # Convert the encoded features to a DataFrame
         tst, _ = encode_categorical(tst, encoder, _cat_feat)
         trn, encoded_part = encode_categorical(trn, encoder, _cat_feat)
+        if _validation_dataset is not None:
+            _validation_dataset, _ = encode_categorical(_validation_dataset, encoder, _cat_feat)
         # if _make_synthetic is not None:
         #     sample_trn, _ = encode_categorical(sample_trn, encoder, _cat_feat)
         cat_feature_names = encoded_part.columns.values.tolist()
@@ -248,6 +248,8 @@ def prepare_dataset_2(_datasets: list, _normalize: bool, _make_synthetic: bool, 
 
     if _make_synthetic:
         trn = pd.concat([trn, sample_trn], axis=0)
+    if _validation_dataset is not None:
+        return trn, _validation_dataset, tst, cat_feature_names
     return trn, tst, cat_feature_names
 
 
@@ -320,7 +322,7 @@ def add_quality_features(df: pd.DataFrame, _total_ds: pd.DataFrame):
                 df = df.drop(columns=metric+'_after')
 
 #    df['DRIVER_FIO'] = df['DRIVER_FIO'].where(df['DRIVER_FIO'].map(df['DRIVER_FIO'].value_counts()) > 10, 'Other').astype('str')
-    df['tenure_adjusted_activity'] = df['Active_months'] / df['Dur_months']
+    #df['tenure_adjusted_activity'] = df['Active_months'] / df['Dur_months']
 #    df['debit_rate'] = df['sum_debits_12'] / df['Turnover_sum_last_12']
  #   df['debit_rate_deriv'] = (df['sum_debits_3'] / df['Turnover_3']) - (df['sum_debits_6'] / df['Turnover_6'])
 
@@ -333,9 +335,22 @@ def add_quality_features(df: pd.DataFrame, _total_ds: pd.DataFrame):
 
     for c in df.columns:
         if 'AVG_PRICE' in c:
-            df[c] = pd.qcut(_total_ds[c], q=5, labels=['low', 'medium_low', 'medium', 'medium_high', 'high'], duplicates='drop')
+            training_prices = pd.to_numeric(_total_ds[c], errors='coerce').dropna()
+            if training_prices.nunique() < 2:
+                df[c] = 'medium'
+            else:
+                _, bins = pd.qcut(training_prices, q=5, retbins=True, duplicates='drop')
+                bins[0], bins[-1] = -np.inf, np.inf
+                labels = ['low', 'medium_low', 'medium', 'medium_high', 'high']
+                if len(bins) - 1 != 5:
+                    labels = [f'price_bin_{i}' for i in range(len(bins) - 1)]
+                df[c] = pd.cut(pd.to_numeric(df[c], errors='coerce'), bins=bins, labels=labels, include_lowest=True)
+                df[c] = df[c].cat.add_categories(['missing']).fillna('missing')
             calculated_cat_feat.append(c)
     #df['turnover_vs_seasonality'] = df['turnover_group'].astype('str') + '_' + df['Seasonality'].astype('str')
+    df['IPP'] = df['Dur_months'] > 4 * 12
+    df['IPP_2'] = df['Dur_months'] > 12
+
     df['carpet_area'] = df['sqm_sum'] / (df['Frequency_of_changes_sum'])
     df = df.drop(columns=['Frequency_of_changes_sum', 'Turnover_sum_last_12', 'total_recalculations', 'sqm_sum'], errors='ignore')
     # important_feat = ['last_3m_клиент просит заменять ковры чаще',
@@ -380,9 +395,9 @@ def add_quality_features(df: pd.DataFrame, _total_ds: pd.DataFrame):
 
     return df, calculated_cat_feat
 
-def create_features_for_datasets(_datasets: list, _config):
+def create_features_for_datasets(_datasets: list, _config, _validation_index=None):
     improved_datasets = []
-    tot_ds = pd.concat(_datasets, axis=0)
+    tot_ds = pd.concat([d for i, d in enumerate(_datasets) if i != 0 and i != _validation_index], axis=0)
 
 
     for c in _datasets[0].columns:

@@ -19,7 +19,7 @@ import optuna
 from optuna.pruners import MedianPruner
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.metrics import r2_score, precision_score, recall_score, f1_score, confusion_matrix, balanced_accuracy_score
-from sklearn.metrics import f1_score, precision_recall_curve
+from sklearn.metrics import f1_score, precision_recall_curve, roc_curve
 
 from sklearn.model_selection import train_test_split, cross_val_score
 from pytorch_tabnet.tab_model import TabNetClassifier
@@ -35,6 +35,7 @@ from pathlib import Path
 import seaborn as sn
 import matplotlib.pyplot as plt
 
+from test_ca import test
 from utils.dataset_13 import create_features_for_datasets, collect_datasets, minority_class_resample, prepare_dataset_2
 from eval_model import test_rowwise
 # industry_avg_income = df.groupby('field')['income_shortterm'].mean().to_dict()
@@ -103,18 +104,18 @@ def train_catboost(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_fe
     # model already initialized with latest version of optimized parameters for our dataset
 
     model = CatBoostClassifier(
-        # iterations=562, #400  # Fewer trees + early stopping
-        # learning_rate=0.075,  #0.08,  # Smaller steps for better generalization
-        # depth=6,
-        # l2_leaf_reg=5, #10,  # Stronger L2 regularization
-        # bootstrap_type='MVS',
-        # # bagging_temperature=1,  # Less aggressive subsampling
-        # random_strength=1,  # Default randomness
-        # loss_function='Logloss',
-        # eval_metric='AUC',
-        # auto_class_weights='Balanced',  # Adjust for class imbalance
-        # od_type='Iter',  # Early stopping
-        # od_wait=51,  # Patience before stopping
+        iterations=562, #400  # Fewer trees + early stopping
+        learning_rate=0.075,  #0.08,  # Smaller steps for better generalization
+        depth=6,
+        l2_leaf_reg=5, #10,  # Stronger L2 regularization
+        bootstrap_type='MVS',
+        # bagging_temperature=1,  # Less aggressive subsampling
+        random_strength=1,  # Default randomness
+        loss_function='Logloss',
+        eval_metric='AUC',
+        auto_class_weights='Balanced',  # Adjust for class imbalance
+        od_type='Iter',  # Early stopping
+        od_wait=51,  # Patience before stopping
     )
     #CatBoostClassifier._clear_training_state()  # Critical for looped execution
 
@@ -193,154 +194,6 @@ def train_catboost(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_fe
     show_importance(_x_train, _y_train, model)
 
     return model
-
-
-def train_tabnet(_x_train, _y_train, _x_test, _y_test, _sample_weight):
-    def objective(trial):
-        params = {
-            "n_d": trial.suggest_int("n_d", 4, 16),
-            "n_a": trial.suggest_int("n_a", 4, 16),
-            "n_steps": trial.suggest_int("n_steps", 3, 10),
-            "gamma": trial.suggest_float("gamma", 1.0, 2.0),
-            "lambda_sparse": trial.suggest_float("lambda_sparse", 1e-4, 1e-2, log=True),
-            "optimizer_fn": torch.optim.Adam,
-            "optimizer_params": {
-                "lr": trial.suggest_float("learning_rate", 1e-3, 1e-1, log=True)  # Key change
-            },        }
-
-        model = TabNetClassifier(**params)
-        model.fit(_x_train.values, _y_train.values, eval_set=[(_x_test.values, _y_test.values)], eval_metric=['auc'], weights=_sample_weight, max_epochs=50, patience=10)
-        return max(model.history["val_0_auc"])  # Возвращаем accuracy на валидации
-
-    # study = optuna.create_study(direction="maximize", pruner=MedianPruner())
-    # study.optimize(objective, n_trials=50)
-    #
-    # print("Лучшие параметры:", study.best_params)
-
-    # Задаём параметры модели
-    tabnet_params = {
-        "n_d": 14,              # Размерность шага предсказания
-        "n_a": 11,              # Размерность шага внимания
-        "n_steps": 10,          # Количество шагов
-        "gamma": 1.87,          # Коэффициент масштабирования для шагов
-        "lambda_sparse": 0.1, # Коэффициент разреженности
-        "optimizer_fn": torch.optim.Adam,
-        "optimizer_params": {"lr": 0.0002},
-        "mask_type": "sparsemax",
-        "device_name": "cuda" if torch.cuda.is_available() else "cpu",
-    }
-
-    # Создаём и обучаем модель
-    clf = TabNetClassifier(**tabnet_params)
-    clf.fit(
-        X_train=_x_train.values,
-        y_train=_y_train.values,
-        eval_set=[(_x_test.values, _y_test.values)],
-        eval_name=["valid"],
-        max_epochs=50,
-        patience=25,  # Ранняя остановка, если нет улучшений
-        batch_size=1024,
-    )
-
-    # Предсказание
-    y_pred = clf.predict(_x_test.values)
-    # y_pred = (y_pred[:, 1] > 0.7).astype(int)
-    conf_matrix = confusion_matrix(_y_test, y_pred)
-    print("Confusion Matrix:")
-    print(conf_matrix)
-
-    precision = precision_score(_y_test, y_pred)
-    recall = recall_score(_y_test, y_pred)
-
-    print(f"Precision: {precision:.2f}")
-    print(f"Recall: {recall:.2f}")
-
-def train_random_forest_regr(_x_train, _y_train, _x_test, _y_test, _sample_weight, _num_iters):
-    model = RandomForestRegressor(n_estimators=100, max_features='sqrt')
-    best_precision = 0.
-    best_model = model
-
-    print("Model attr:", model.__dict__)
-    test_result = {}
-    print(f"Fitting Random Forest...")
-    for iter in range(_num_iters):
-        model.fit(_x_train, _y_train, sample_weight=_sample_weight)
-        print("\nModel attr after fitting:", model.__dict__)
-        predictions = model.predict(_x_test)
-
-        # Transform probabilities to binary classification output in order to calc metrics:
-        thrs = 0.5
-        for i, p in enumerate(predictions):
-            if p > thrs:
-                predictions[i] = 1
-            else:
-                predictions[i] = 0
-        print(_y_test, predictions)
-        test_result['Precision'] = precision_score(_y_test, predictions)
-        if test_result['Precision'] > best_precision:
-            best_precision = test_result['Precision']
-            best_model = model
-
-            test_result['R2'] = r2_score(_y_test, predictions)
-            test_result['Recall'] = recall_score(_y_test, predictions)
-            test_result['F1'] = f1_score(_y_test, predictions)
-
-    print(f"\nRandom Forest best result: R2 score = {test_result['R2']}\nRecall = {test_result['Recall']}\nPrecision = {test_result['Precision']}\nF1 = {test_result['F1']}")
-
-    feature_importance = best_model.feature_importances_
-    feature_importance_df = pd.DataFrame({'Feature': _x_train.columns, 'Importance': feature_importance})
-    print(feature_importance_df)
-
-    return best_model
-
-
-def train_random_forest_cls(_x_train, _y_train, _x_test, _y_test, _sample_weight, _num_iters):
-    model = RandomForestClassifier(n_estimators=200,
-                                   max_depth=9,
-                                   max_features=5,
-                                   min_samples_leaf=5,
-                                   min_samples_split=5)
-    best_f1 = 0.
-    best_model = model
-
-    test_result = {}
-    # grid_space = {'max_depth': [3, 5, 10, None],
-    #               'n_estimators': [50, 100, 200],
-    #               'max_features': [1, 3, 5, 7, 9],
-    #               'min_samples_leaf': [1, 2, 3, 7],
-    #               'min_samples_split': [1, 2, 3, 7]
-    #               }
-    # grid = GridSearchCV(model, param_grid=grid_space, cv=3, scoring='f1')
-    # model_grid = grid.fit(_x_train, _y_train)
-    # print('Best hyperparameters are: ' + str(model_grid.best_params_))
-    # print('Best score is: ' + str(model_grid.best_score_))
-
-    print(f"Fitting Random Forest classifier...")
-    for iter in range(_num_iters):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model.fit(_x_train, _y_train)  #, sample_weight=_sample_weight)
-        predictions = model.predict(_x_test)
-
-        test_result['Precision'] = precision_score(_y_test, predictions)
-        test_result['Recall'] = recall_score(_y_test, predictions)
-        test_result['F1'] = f1_score(_y_test, predictions)
-
-        if test_result['F1'] > best_f1:
-            best_f1 = test_result['F1']
-            best_model = model
-
-            test_result['Recall'] = recall_score(_y_test, predictions)
-            test_result['Precision'] = precision_score(_y_test, predictions)
-
-    print(f"\nRandom Forest classifier best result: Recall = {test_result['Recall']}\nPrecision = {test_result['Precision']}\nF1 = {test_result['F1']}")
-
-    feature_importance = best_model.feature_importances_
-    feature_importance_df = pd.DataFrame({'Feature': _x_train.columns, 'Importance': feature_importance})
-    print(feature_importance_df)
-
-    return best_model
-
 
 
 def train(_x_train, _y_train, _x_test, _y_test, _sample_weight, _cat_feats_encoded, _model_name, _num_iters):
@@ -575,133 +428,19 @@ def test_with_slices(_model, trn, trg, target_positive_rates=[0.03, 0.1, 0.2]):
 
 
 
-def test(_model, trn, trg, target_positive_rates=[0.20]):
-    # --- Разворачиваем bundle: (model + calibration_scale) или чистую модель ---
-    if isinstance(_model, dict):
-        scale = _model.get('calibration_scale', 1.0)
-        _model = _model['model']
-    else:
-        scale = 1.0
+def select_threshold(y_true, y_proba):
+    if len(np.unique(y_true)) != 2:
+        raise ValueError('Validation must contain both classes to select a balanced-accuracy threshold')
+    false_positive, true_positive, thresholds = roc_curve(y_true, y_proba)
+    finite = np.isfinite(thresholds)
+    return float(thresholds[finite][np.argmax((true_positive - false_positive)[finite])])
 
-    print(f"Calibration scale = {scale:.4f}")
 
-    # --- Сырые вероятности и их калибровка (один раз) ---
-    y_proba_raw = _model.predict_proba(trn)[:, 1]
-    y_proba = np.clip(y_proba_raw * scale, 0, 1)
-
-    # --- Оптимальный порог по F1 ---
-    precision_curve, recall_curve, thresholds_curve = precision_recall_curve(trg, y_proba)
-    f1_scores = 2 * (precision_curve * recall_curve) / (precision_curve + recall_curve + 1e-9)
-    optimal_idx = np.argmax(f1_scores)
-    optimal_threshold = thresholds_curve[optimal_idx]
-
-    # --- Пороги под заданные доли положительного класса ---
-    sorted_proba = np.sort(y_proba)[::-1]
-    percentile_thresholds = {}
-    for target_rate in target_positive_rates:
-        n_positive = int(len(y_proba) * target_rate)
-        if 0 < n_positive <= len(sorted_proba):
-            percentile_threshold = sorted_proba[n_positive - 1]
-            percentile_thresholds[target_rate] = percentile_threshold
-            print(f"Threshold for {target_rate * 100:.0f}% positive rate: {percentile_threshold:.4f}")
-
-    # --- Объединяем пороги ---
-    thresholds = [optimal_threshold] + list(percentile_thresholds.values())
-    threshold_labels = ['Optimal F1'] + [f'{rate * 100:.0f}% Positive' for rate in target_positive_rates]
-
-    N_1 = int((trg == 1).sum())
-    N_0 = int((trg == 0).sum())
-
-    def adjusted_precision(P, N, M, new_N, new_M):
-        numerator = P * (new_N / N)
-        denominator = numerator + (1 - P) * (new_M / M)
-        return numerator / denominator
-
-    results = []
-
-    for i, thrs in enumerate(thresholds):
-        print(f"\n{'=' * 60}")
-        print(f"Testing with threshold = {thrs:.4f} ({threshold_labels[i]})")
-        print(f"{'=' * 60}")
-
-        predictions = (y_proba > thrs).astype(int)
-        actual_positive_rate = predictions.mean()
-
-        f1_united = f1_score(trg, predictions)
-        recall_united = recall_score(trg, predictions)
-        precision_united = precision_score(trg, predictions)
-        precision_united_adjusted = adjusted_precision(precision_united, N_1, N_0, 1000, 9000)
-        a = balanced_accuracy_score(trg, predictions)
-
-        print(f"CatBoost result: F1 = {f1_united:.2f}, "
-              f"Recall = {recall_united:.2f}, Precision = {precision_united:.2f}")
-        print(f"Adjusted Precision = {precision_united_adjusted:.2f}, "
-              f"Balanced Accuracy = {a:.2f}")
-        print(f"Actual Positive Rate: {actual_positive_rate * 100:.1f}%")
-
-        save_value_to_csv(a)
-
-        # --- Confusion matrix ---
-        result = confusion_matrix(trg, predictions)
-        plt.figure(figsize=(8, 6))
-        sn.set(font_scale=1.4)
-        sn.heatmap(result, annot=True, annot_kws={"size": 16}, fmt='d', cmap='Blues')
-        plt.title(f'Confusion Matrix - {threshold_labels[i]}')
-        plt.show()
-
-        # --- Распределения вероятностей по классам ---
-        proba_class_0 = y_proba[trg == 0]
-        proba_class_1 = y_proba[trg == 1]
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.hist(proba_class_0, bins=50, color='blue', alpha=0.5,
-                label='Class 0', edgecolor='black')
-        ax.hist(proba_class_1, bins=50, color='green', alpha=0.5,
-                label='Class 1', edgecolor='black')
-        ax.axvline(x=thrs, color='red', linestyle='--', linewidth=2,
-                   label=f'Threshold = {thrs:.3f}')
-        ax.set_xlabel('Predicted Probability')
-        ax.set_ylabel('Number of Predictions')
-        ax.set_title(
-            f'Combined Distribution - {threshold_labels[i]}\n'
-            f'Actual Positive Rate: {actual_positive_rate * 100:.1f}%'
-        )
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.show()
-
-        results.append({
-            'threshold_label': threshold_labels[i],
-            'threshold': thrs,
-            'f1': f1_united,
-            'recall': recall_united,
-            'precision': precision_united,
-            'adjusted_precision': precision_united_adjusted,
-            'balanced_accuracy': a,
-            'actual_positive_rate': actual_positive_rate,
-        })
-
-    # --- Итоговая таблица ---
-    print(f"\n{'=' * 60}")
-    print("SUMMARY COMPARISON")
-    print(f"{'=' * 60}")
-    header = (
-        f"{'Threshold Type':<20} {'Threshold':<10} {'F1':<8} "
-        f"{'Recall':<8} {'Precision':<10} {'Adjusted':<10} "
-        f"{'BA':<8} {'Pos Rate':<10}"
-    )
-    print(header)
-    print("-" * len(header))
-    for res in results:
-        print(
-            f"{res['threshold_label']:<20} {res['threshold']:<10.4f} "
-            f"{res['f1']:<8.3f} {res['recall']:<8.3f} {res['precision']:<10.3f} "
-            f"{res['adjusted_precision']:<10.3f} {res['balanced_accuracy']:<8.3f} "
-            f"{res['actual_positive_rate'] * 100:<10.1f}%"
-        )
-
-    return results
+def remove_test_duplicates(x_train, y_train, x_test):
+    duplicates = pd.MultiIndex.from_frame(x_train).isin(pd.MultiIndex.from_frame(x_test[x_train.columns]))
+    print(f'Number of duplicate training rows: {int(duplicates.sum())}')
+    return (x_train.iloc[~duplicates].reset_index(drop=True),
+            y_train.iloc[~duplicates].reset_index(drop=True))
 
 
 # Example usage:
@@ -845,6 +584,8 @@ def main(_config: dict):
 
     data_path = _config['dataset_src']
     datasets = collect_datasets(data_path)
+    if len(datasets) < 3:
+        raise ValueError('At least three snapshots are required: test, training and validation')
     rand_states = [4]
     score = [0, 0, 0]
 
@@ -862,52 +603,51 @@ def main(_config: dict):
         datasets = remove_outliers(datasets)
 
     if _config['calculated_features']:
-        datasets, new_cat_feat = create_features_for_datasets(datasets, _config)
+        datasets, new_cat_feat = create_features_for_datasets(datasets, _config, _validation_index=len(datasets) - 1)
         _config['cat_features'] += new_cat_feat
 
     for split_rand_state in rand_states:
-        d_train, d_test, cat_feats_encoded = prepare_dataset_2(
-            datasets, _config['normalize'], _config['make_synthetic'],
+        d_train, d_validation, d_test, cat_feats_encoded = prepare_dataset_2(
+            datasets[:-1], _config['normalize'], _config['make_synthetic'],
             _config['encode_categorical'], _config['cat_features'],
-            split_rand_state
+            split_rand_state, _validation_dataset=datasets[-1]
         )
         d_test  = d_test.drop(columns=['INN'], errors='ignore')
         d_train = d_train.drop(columns=['INN'], errors='ignore')
+        d_validation = d_validation.drop(columns=['INN'], errors='ignore')
 
-        print(f"X train: {d_train.shape[0]}, x_val: {d_test.shape[0]}")
+        print(f"Train: {len(d_train)}, validation: {len(d_validation)}, test: {len(d_test)}")
 
         if _config['smote']:
             d_train = minority_class_resample(d_train, cat_feats_encoded)
 
-        d_train = d_train[d_train['Dur_months'] >= 12].copy()
-        d_test  = d_test[d_test['Dur_months'] >= 12].copy()
-        #d_train = d_train.drop(columns=['Dur_months'], errors='ignore')
-        #d_test = d_test.drop(columns=['Dur_months'], errors='ignore')
+        min_dur = -100
+        d_train = d_train[d_train['Dur_months'] >= min_dur].copy()
+        d_test  = d_test[d_test['Dur_months'] >= min_dur].copy()
+        d_validation = d_validation[d_validation['Dur_months'] >= min_dur].copy()
+        d_train = d_train.drop(columns=['Dur_months'], errors='ignore')
+        d_test = d_test.drop(columns=['Dur_months'], errors='ignore')
+        d_validation = d_validation.drop(columns=['Dur_months'], errors='ignore')
 
 
         x_train = d_train.drop('ACTIVITY_AND_ATTRITION', axis=1)
         y_train = d_train['ACTIVITY_AND_ATTRITION']
-        x_val   = d_test.drop('ACTIVITY_AND_ATTRITION', axis=1)
-        y_val   = d_test['ACTIVITY_AND_ATTRITION']
+        x_val   = d_validation.drop('ACTIVITY_AND_ATTRITION', axis=1)
+        y_val   = d_validation['ACTIVITY_AND_ATTRITION']
+        x_test = d_test.drop('ACTIVITY_AND_ATTRITION', axis=1)
+        y_test = d_test['ACTIVITY_AND_ATTRITION']
 
         print(f"X train: {x_train.shape[0]}, x_val: {x_val.shape[0]}, "
               f"y_train: {y_train.shape[0]}, y_val: {y_val.shape[0]}")
 
-        sample_weight = calc_weights(y_val, y_val)
-
-        # --- дедупликация (как было) ---
-        x_train_reset = x_train.reset_index(drop=True)
-        x_val_reset   = x_val.reset_index(drop=True)
-        y_train_reset = y_train.reset_index(drop=True)
-
-        merged = pd.merge(x_train_reset, x_val_reset, how='inner', indicator=False)
-        print(f"\n\nNumber of duplicate rows: {len(merged)}")
-        duplicate_indices = merged.index
-
         print(f"Original x_train shape: {x_train.shape}")
-        x_train = x_train_reset.drop(duplicate_indices).reset_index(drop=True)
-        y_train = y_train_reset.drop(duplicate_indices).reset_index(drop=True)
+        x_train, y_train = remove_test_duplicates(x_train, y_train, x_test)
+        x_train, y_train = remove_test_duplicates(x_train, y_train, x_val)
+        x_val, y_val = remove_test_duplicates(x_val, y_val, x_test)
+        if x_train.empty or x_val.empty or x_test.empty:
+            raise ValueError('Training, validation and test must remain nonempty after filtering')
         print(f"Cleaned x_train shape: {x_train.shape}")
+        sample_weight = calc_weights(y_train, y_val)
 
         trained_model = train(x_train, y_train, x_val, y_val, sample_weight,
                               cat_feats_encoded, _config['model'], _config['num_iters'])
@@ -921,12 +661,16 @@ def main(_config: dict):
         print(f"Calibration scale = {scale:.4f} "
               f"(base_rate={base_rate:.4f}, raw_mean={raw_mean:.4f})")
 
+        decision_threshold = select_threshold(y_val, np.clip(val_proba * scale, 0, 1))
+        bundle = {'model': trained_model, 'calibration_scale': scale,
+                  'decision_threshold': decision_threshold}
+
         with open('model.pkl', 'wb') as f:
             print("Saving model..")
-            pickle.dump({'model': trained_model, 'calibration_scale': scale}, f)
+            pickle.dump(bundle, f)
 
         print('Metrics on TEST set:')
-        test(trained_model, x_val, y_val)
+        test(bundle, x_test, y_test)
 
     return
 
@@ -936,7 +680,7 @@ def train_model(config):
     return main(config.copy())
 
 
-def save_value_to_csv(value, filename='values.csv'):
+def save_value_to_csv(value, filename='values.csv', **metadata):
     """
     Append a floating point value to a CSV file in column 0
 
@@ -945,7 +689,7 @@ def save_value_to_csv(value, filename='values.csv'):
         filename: name of the CSV file
     """
     # Create a DataFrame with the value
-    new_row = pd.DataFrame({'values': [value]})
+    new_row = pd.DataFrame({'values': [value], **{key: [val] for key, val in metadata.items()}})
 
     # Append to existing file or create new one
     if os.path.exists(filename):
@@ -966,7 +710,7 @@ if __name__ == '__main__':
         'model': 'CatBoostClassifier',  # options: 'TabNet', 'RandomForestClassifier', 'XGBoostClassifier', 'CatBoostClassifier'
         'num_iters': 10,
         'normalize': False,  # normalize input values or not
-        'dataset_src': 'data/v26',
+        'dataset_src': 'data/v28',
         'encode_categorical': True,
         'calculated_features': True,
         'remove_outliers': False,

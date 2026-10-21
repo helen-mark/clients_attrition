@@ -1,122 +1,314 @@
-import pickle
+from dataclasses import dataclass, asdict
+from typing import Iterable, List, Optional, Sequence
 
 import numpy as np
-import pandas as pd
-from sklearn.metrics import r2_score, precision_score, recall_score, f1_score, confusion_matrix, balanced_accuracy_score
-from catboost import CatBoostClassifier, Pool
-
-from pathlib import Path
-# from examples.local import setting_dask_env
-
-import seaborn as sn
 import matplotlib.pyplot as plt
-
-from utils.dataset_13 import create_features_for_datasets, collect_datasets, minority_class_resample, prepare_dataset_2
-
-def test(_model, trn, trg):
-    def adjusted_precision(P, N, M, new_N, new_M):
-        numerator = P * (new_N / N)
-        denominator = numerator + (1 - P) * (new_M / M)
-        return numerator / denominator
-
-    thresholds = [0.066]
-    N_1 = len([y for y in trg if y == 1])
-    N_0 = len([y for y in trg if y == 0])
-
-    for thrs in thresholds:
-        print(f"Testing on united data with threshold = {thrs}...")
-        predictions = _model.predict_proba(trn)
-        predictions = (predictions[:, 1] > thrs).astype(int)
-
-        f1_united = f1_score(trg, predictions)
-        recall_united = recall_score(trg, predictions)
-        precision_united = precision_score(trg, predictions)
-        precision_united = adjusted_precision(precision_united, N_1, N_0, 1800, 8200)
-        a = balanced_accuracy_score(trg, predictions)
-
-        print(f"CatBoost result: F1 = {f1_united:.2f}, Recall = {recall_united:.2f}, Precision - {precision_united:.2f}, ba - {a:.2f}")
-        result = confusion_matrix(trg, predictions, normalize='true')
-        sn.set(font_scale=1.4)  # for label size
-        sn.heatmap(result, annot=True, annot_kws={"size": 16})  # font size
-
-        plt.show()
-        plt.clf()
-    return
-
-def calc_weights(_y_train: pd.DataFrame, _y_val: pd.DataFrame):
-    w_0, w_1 = 0, 0
-    for i in _y_train.values:
-        w_0 += 1 - i.item()
-        w_1 += i.item()
-
-    tot = w_0 + w_1
-    w_0 = w_0 / tot
-    w_1 = w_1 / tot
-    print(f"weights:", w_0, w_1)
-    #return np.array([w_0 if i == 1 else w_1 for i in _y_train.values])
-    return np.array([1 if i == 1 else 1 for i in _y_train.values])
+import seaborn as sn
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 
 
-def main(_config: dict):
-    data_path = _config['dataset_src']
-    datasets = collect_datasets(data_path)
-    rand_states = [4] # range(5)  # [777, 42, 6, 1370, 5087]
+# --------------------------------------------------------------------------- #
+#                                 Data models                                 #
+# --------------------------------------------------------------------------- #
 
-    if _config['calculated_features']:
-        datasets, new_cat_feat = create_features_for_datasets(datasets, _config)
-        _config['cat_features'] += new_cat_feat
-
-
-    for split_rand_state in rand_states:
-        d_train, d_test, cat_feats_encoded = prepare_dataset_2(datasets, _config['normalize'], _config['make_synthetic'], _config['encode_categorical'], _config['cat_features'], split_rand_state)
-        print(d_test)
-        d_test = d_test.drop(columns='INN')
-        d_train = d_train.drop(columns='INN')
-
-        print(f"X train: {d_train.shape[0]}, x_val: {d_test.shape[0]}")
-
-        if _config['smote']:
-            d_train = minority_class_resample(d_train,cat_feats_encoded)
-        #
-        # d_train = d_train.drop(columns=['total_spacetime_area'])
-        # d_test = d_test.drop(columns=['total_spacetime_area'])
-
-        d_train = d_train[d_train['Dur_months'] >= 7]
-        d_test = d_test[d_test['Dur_months'] >= 7]
+@dataclass
+class ThresholdSpec:
+    label: str
+    threshold: float
+    predictions: np.ndarray
 
 
-        x_train = d_train.drop('ACTIVITY_AND_ATTRITION', axis=1)
-        y_train = d_train['ACTIVITY_AND_ATTRITION']
-        x_val = d_test.drop('ACTIVITY_AND_ATTRITION', axis=1)
-        y_val = d_test['ACTIVITY_AND_ATTRITION']
-
-        # correlations = x_train.corrwith(d_train['ACTIVITY_AND_ATTRITION']).abs().sort_values(ascending=False)
-        #
-        # sn.barplot(x=correlations.head(20), y=correlations.head(20).index)
-        # plt.title('Top 20 features correlated with target')
-        # plt.show()
-
-        print(f"X train: {x_train.shape[0]}, x_val: {x_val.shape[0]}, y_train: {y_train.shape[0]}, y_val: {y_val.shape[0]}")
-        trained_model = pickle.load(open("model.pkl", 'rb'))
-
-        #print('Metrics on TRAIN set:')
-        #test(trained_model, x_train, y_train)
-        print('Metrics on TEST set:')
-        test(trained_model, x_val, y_val)
+@dataclass
+class ThresholdResult:
+    threshold_label: str
+    threshold: float
+    f1: float
+    recall: float
+    precision: float
+    adjusted_precision: float
+    balanced_accuracy: float
+    actual_positive_rate: float
 
 
-if __name__ == '__main__':
-    # config_path = 'config.json'  # config file is used to store some parameters of the dataset
-    config = {
-        'model': 'CatBoostClassifier',  # options: 'TabNet', 'RandomForestClassifier', 'XGBoostClassifier', 'CatBoostClassifier'
-        'num_iters': 10,
-        'normalize': False,  # normalize input values or not
-        'dataset_src': 'data/v19',
-        'encode_categorical': True,
-        'calculated_features': True,
-        'make_synthetic': None,  # options: 'sdv', 'ydata', None
-        'smote': False,  # perhaps not needed for catboost and in case if minority : majority > 0.5
-        'cat_features': ['legal_type']
-    }
+# --------------------------------------------------------------------------- #
+#                                   Helpers                                   #
+# --------------------------------------------------------------------------- #
 
-    main(config)
+def _unpack_model(_model):
+    """Разворачивает bundle (model + калибровка + порог) или чистую модель."""
+    if isinstance(_model, dict):
+        scale = _model.get('calibration_scale', 1.0)
+        decision_threshold = _model.get('decision_threshold', 0.5)
+        model = _model['model']
+    else:
+        scale = 1.0
+        decision_threshold = 0.5
+        model = _model
+    return model, scale, decision_threshold
+
+
+def _calibrated_proba(model, X, scale: float) -> np.ndarray:
+    raw = model.predict_proba(X)[:, 1]
+    return np.clip(raw * scale, 0.0, 1.0)
+
+
+def _best_ba_threshold(y_proba: np.ndarray, y_true: np.ndarray) -> tuple[float, float]:
+    """
+    Возвращает (порог, BA) для порога, максимизирующего Balanced Accuracy.
+
+    Векторизованно: сортируем по вероятности, накапливаем TP/FP при движении
+    порога справа налево (от самого высокого значения вероятности).
+    """
+    P = int((y_true == 1).sum())
+    N = int((y_true == 0).sum())
+    if P == 0 or N == 0:
+        # BA не определена; возвращаем дефолт, чтобы не ломать пайплайн
+        return 0.5, float('nan')
+
+    order = np.argsort(y_proba, kind='stable')[::-1]      # по убыванию proba
+    y_sorted = y_true[order]
+    p_sorted = y_proba[order]
+
+    # Идём по порогу сверху вниз: сначала все предсказаны как 0,
+    # затем постепенно добавляем объекты как "1".
+    tp = np.cumsum(y_sorted == 1)
+    fp = np.cumsum(y_sorted == 0)
+
+    tpr = tp / P
+    tnr = 1.0 - fp / N                                     # = (N - fp) / N
+    ba = 0.5 * (tpr + tnr)
+
+    # Порог должен меняться только на уникальных значениях вероятности,
+    # иначе получим промежуточные (бессмысленные) точки внутри плато.
+    # Берём последний индекс в каждой группе одинаковых proba.
+    _, last_idx = np.unique(p_sorted, return_index=True)   # индексы первых вхождений
+    # np.unique на убывающем массиве даёт уникальные значения в порядке возрастания
+    # и первые индексы в этом (уже убывающем) массиве — это концы групп.
+    valid_idx = np.sort(last_idx)
+
+    ba_at_thresholds = ba[valid_idx]
+    best_pos = int(np.argmax(ba_at_thresholds))
+    best_idx = valid_idx[best_pos]
+
+    best_ba = float(ba_at_thresholds[best_pos])
+    best_threshold = float(p_sorted[best_idx])
+    return best_threshold, best_ba
+
+
+def _topk_threshold(y_proba: np.ndarray, target_rate: float) -> tuple[float, np.ndarray]:
+    """Порог, при котором доля позитивов ≈ target_rate (top-k по вероятности)."""
+    if not 0 <= target_rate <= 1:
+        raise ValueError('Positive rates must be between 0 and 1')
+
+    n = len(y_proba)
+    n_positive = int(n * target_rate)
+
+    sorted_idx = np.argsort(-y_proba, kind='stable')
+    predictions = np.zeros(n, dtype=int)
+    predictions[sorted_idx[:n_positive]] = 1
+
+    if n_positive == 0:
+        threshold = np.inf
+    else:
+        threshold = float(y_proba[sorted_idx[n_positive - 1]])
+    return threshold, predictions
+
+
+def _adjusted_precision(P: float, N: int, M: int, new_N: int, new_M: int) -> float:
+    """Precision, пересчитанная под новый баланс классов (new_N : new_M)."""
+    if N == 0 or M == 0 or np.isnan(P):
+        return float('nan')
+    numerator = P * (new_N / N)
+    denominator = numerator + (1 - P) * (new_M / M)
+    return numerator / denominator if denominator else 0.0
+
+
+def _plot_confusion(y_true, y_pred, title: str) -> None:
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(8, 6))
+    sn.set(font_scale=1.4)
+    sn.heatmap(cm, annot=True, annot_kws={"size": 16}, fmt='d', cmap='Blues')
+    plt.title(f'Confusion Matrix - {title}')
+    plt.tight_layout()
+    plt.show()
+
+
+def _plot_distribution(
+    y_proba: np.ndarray,
+    y_true: np.ndarray,
+    threshold: float,
+    title: str,
+    actual_positive_rate: float,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(y_proba[y_true == 0], bins=50, color='blue', alpha=0.5,
+            label='Class 0', edgecolor='black')
+    ax.hist(y_proba[y_true == 1], bins=50, color='green', alpha=0.5,
+            label='Class 1', edgecolor='black')
+    ax.axvline(x=threshold, color='red', linestyle='--', linewidth=2,
+               label=f'Threshold = {threshold:.3f}')
+    ax.set_xlabel('Predicted Probability')
+    ax.set_ylabel('Number of Predictions')
+    ax.set_title(
+        f'Combined Distribution - {title}\n'
+        f'Actual Positive Rate: {actual_positive_rate * 100:.1f}%'
+    )
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
+def _build_threshold_specs(
+    y_proba: np.ndarray,
+    y_true: np.ndarray,
+    decision_threshold: float,
+    target_positive_rates: Iterable[float],
+) -> List[ThresholdSpec]:
+    """Собирает все варианты порогов, которые нужно протестировать."""
+    specs: List[ThresholdSpec] = []
+
+    # 1) Фиксированный порог из bundle
+    specs.append(ThresholdSpec(
+        label='Fixed threshold',
+        threshold=decision_threshold,
+        predictions=(y_proba >= decision_threshold).astype(int),
+    ))
+
+    # 2) Порог по максимальному Balanced Accuracy
+    ba_threshold, ba_value = _best_ba_threshold(y_proba, y_true)
+    print(f"Best BA threshold = {ba_threshold:.4f} (BA = {ba_value:.4f})")
+    specs.append(ThresholdSpec(
+        label='Best BA',
+        threshold=ba_threshold,
+        predictions=(y_proba >= ba_threshold).astype(int),
+    ))
+
+    # 3) Квантильные пороги под целевые доли позитивов
+    for rate in target_positive_rates:
+        threshold, preds = _topk_threshold(y_proba, rate)
+        specs.append(ThresholdSpec(
+            label=f'{rate * 100:.0f}% Positive',
+            threshold=threshold,
+            predictions=preds,
+        ))
+
+    return specs
+
+
+def _evaluate_spec(
+    spec: ThresholdSpec,
+    y_proba: np.ndarray,
+    y_true: np.ndarray,
+    N_1: int,
+    N_0: int,
+    *,
+    plot: bool,
+) -> ThresholdResult:
+    preds = spec.predictions
+    actual_positive_rate = float(preds.mean())
+
+    f1 = f1_score(y_true, preds, zero_division=0)
+    recall = recall_score(y_true, preds, zero_division=0)
+    precision = precision_score(y_true, preds, zero_division=0)
+    precision_adj = _adjusted_precision(precision, N_1, N_0, new_N=1000, new_M=9000)
+    ba = balanced_accuracy_score(y_true, preds)
+
+    print(f"\n{'=' * 60}")
+    print(f"Testing with threshold = {spec.threshold:.4f} ({spec.label})")
+    print(f"{'=' * 60}")
+    print(f"CatBoost result: F1 = {f1:.2f}, Recall = {recall:.2f}, Precision = {precision:.2f}")
+    print(f"Adjusted Precision = {precision_adj:.2f}, Balanced Accuracy = {ba:.2f}")
+    print(f"Actual Positive Rate: {actual_positive_rate * 100:.1f}%")
+
+    # save_value_to_csv(
+    #     ba,
+    #     threshold_label=spec.label,
+    #     threshold=spec.threshold,
+    #     actual_positive_rate=actual_positive_rate,
+    # )
+
+    if plot:
+        _plot_confusion(y_true, preds, spec.label)
+        _plot_distribution(y_proba, y_true, spec.threshold, spec.label, actual_positive_rate)
+
+    return ThresholdResult(
+        threshold_label=spec.label,
+        threshold=spec.threshold,
+        f1=f1,
+        recall=recall,
+        precision=precision,
+        adjusted_precision=precision_adj,
+        balanced_accuracy=ba,
+        actual_positive_rate=actual_positive_rate,
+    )
+
+
+def _print_summary(results: Sequence[ThresholdResult]) -> None:
+    header = (
+        f"{'Threshold Type':<20} {'Threshold':<10} {'F1':<8} "
+        f"{'Recall':<8} {'Precision':<10} {'Adjusted':<10} "
+        f"{'BA':<8} {'Pos Rate':<10}"
+    )
+    print(f"\n{'=' * 60}")
+    print("SUMMARY COMPARISON")
+    print(f"{'=' * 60}")
+    print(header)
+    print("-" * len(header))
+    for r in results:
+        print(
+            f"{r.threshold_label:<20} {r.threshold:<10.4f} "
+            f"{r.f1:<8.3f} {r.recall:<8.3f} {r.precision:<10.3f} "
+            f"{r.adjusted_precision:<10.3f} {r.balanced_accuracy:<8.3f} "
+            f"{r.actual_positive_rate * 100:<10.1f}%"
+        )
+
+
+# --------------------------------------------------------------------------- #
+#                                 Main entry                                  #
+# --------------------------------------------------------------------------- #
+
+def test(
+    _model,
+    trn,
+    trg,
+    target_positive_rates: Sequence[float] = (0.12,),
+    *,
+    plot: bool = True,
+):
+    """
+    Оценивает модель при нескольких стратегиях выбора порога:
+      * фиксированный порог из bundle (`decision_threshold`, по умолчанию 0.5);
+      * порог, максимизирующий Balanced Accuracy на `trn`;
+      * квантильные пороги под заданные доли позитивов (`target_positive_rates`).
+
+    Возвращает список ThresholdResult.
+    """
+    model, scale, decision_threshold = _unpack_model(_model)
+    print(f"Calibration scale = {scale:.4f}")
+
+    y_proba = _calibrated_proba(model, trn, scale)
+    y_true = np.asarray(trg)
+
+    N_1 = int((y_true == 1).sum())
+    N_0 = int((y_true == 0).sum())
+    if N_1 == 0 or N_0 == 0:
+        print("WARNING: в trg присутствует только один класс — часть метрик будет NaN.")
+
+    specs = _build_threshold_specs(
+        y_proba, y_true, decision_threshold, target_positive_rates,
+    )
+
+    results = [
+        _evaluate_spec(spec, y_proba, y_true, N_1, N_0, plot=plot)
+        for spec in specs
+    ]
+
+    _print_summary(results)
+    return results

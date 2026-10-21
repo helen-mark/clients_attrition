@@ -5,21 +5,21 @@ import pandas as pd
 from dateutil.relativedelta import relativedelta
 
 # Папка с CSV-файлами
-FOLDER = "data/v26"
+FOLDER = "data/v28"
 
 # --- Условие 1: горизонт "видимости" в месяцах ---
-CHURN_HORIZON_MONTHS = 6
+CHURN_HORIZON_MONTHS = 12
 
 # --- Условие 2: статичная дата-отсечка ---
 # Если Latest_date > STATIC_CUTOFF_DATE → принудительно 0.
 # None — отключить.
-STATIC_CUTOFF_DATE = "2026-03-01"  # to cutoff test data to avoid leakage. None if not used
+STATIC_CUTOFF_DATE = None #"2026-03-01"  # to cutoff test data to avoid leakage. None if not used
 
 # --- Условие 3: пост-условие по сезонности ---
 # Если Latest_date >= SEASONALITY_START, то обнуляем, когда:
 #   Seasonality in (1, 2)  ИЛИ  Latest_date >= HARD_ZERO_DATE
 SEASONALITY_START = "2026-03-01"  # maybe just left for summer
-HARD_ZERO_DATE    = "2026-08-01"  # Put CURRENT date here because if Latest_date is now then the client is active
+HARD_ZERO_DATE    = "2026-09-01"  # Put CURRENT date here because if Latest_date is now then the client is active
 SEASONALITY_VALUES = (1, 2)
 
 # Колонки

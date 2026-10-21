@@ -20,8 +20,10 @@ class CommunicationFeatureBuilder:
                  mapping_file='data_cur/mapping/merged.csv',
                  mail_file='data_cur/mail_tagged_plus_llm.csv',
                  calls_file='data_cur/calls_plus_llm.csv',
-                 statistics_cache='artifacts/tag_statistics.parquet'):
+                 statistics_cache='artifacts/tag_statistics.parquet',
+                 inn_mapper=None):
         self._cache_path = Path(statistics_cache)
+        self._inn_mapper = inn_mapper
         self._processor_kwargs = dict(
             mapping_file=mapping_file,
             mail_file=mail_file,
@@ -81,6 +83,8 @@ class CommunicationFeatureBuilder:
 
         # нормализация ИНН на стороне статистики (на всякий случай ещё раз)
         if 'ИНН' in self._statistics.columns:
+            if self._inn_mapper is not None:
+                self._statistics['ИНН'] = pd.to_numeric(self._statistics['ИНН'], errors='coerce').apply(self._inn_mapper)
             self._statistics['ИНН'] = (
                 self._statistics['ИНН'].astype(str)
                 .str.strip()
@@ -125,11 +129,13 @@ class CreateDataset:
         self.horison = horison
         self.randomize = randomize
 
-        self._comm_builder = CommunicationFeatureBuilder()
+        self._comm_builder = CommunicationFeatureBuilder(inn_mapper=self.match_inn)
 
         self.renaming_df = pd.read_csv('reports/Переименования/rename_report.csv', delimiter=';', quotechar='"')
         self.renaming_df['OLD_INN'] = self.renaming_df['OLD_INN'].apply(self.modify_inn)
         self.renaming_df['NEW_INN'] = self.renaming_df['NEW_INN'].apply(self.modify_inn)
+        self._inn_lookup_source = None
+        self._inn_lookup = {}
 
     def modify_inn(self, inn):
         try:
@@ -176,7 +182,7 @@ class CreateDataset:
             # Convert back to datetime (now date-only)
             recalc_df['ACTION_DATE'] = pd.to_datetime(recalc_df['ACTION_DATE'])
 
-            recalc_df = recalc_df.loc[recalc_df['ACTION_DATE'] <= self.data_load_date]
+            recalc_df = recalc_df.loc[recalc_df['ACTION_DATE'] < self.data_load_date]
             recalc_df['INN'] = recalc_df['INN'].apply(self.modify_inn).apply(self.match_inn)
             recalc_df = recalc_df[['INN', 'ACTION_DATE', 'SUMMA_DELTA']].copy()
             dfs.append(recalc_df)
@@ -309,6 +315,8 @@ class CreateDataset:
 
     def load_trip_data(self, base_path):
         all_trips = []
+        loaded_files = set()
+        window_start = self.data_load_date - pd.DateOffset(months=12)
 
         # Годы и русские названия месяцев
         years = ['22', '23', '24', '25', '26']
@@ -317,6 +325,9 @@ class CreateDataset:
 
         stop = False
         for year in years:
+                full_year = 2000 + int(year)
+                if full_year < window_start.year:
+                    continue
                 if stop:
                     break
 
@@ -325,7 +336,7 @@ class CreateDataset:
                 # if int(year) == data_begin_date.year and month_n < data_begin_date.month - 1:
                 #     continue
                 print(f'Loading trips {year} ...')
-                if int(year) > self.data_load_date.year:  # and month_n == self.data_load_date.month - 1:
+                if full_year > self.data_load_date.year:
                     print('hit the upper bound')
                     stop = True
                     break
@@ -333,6 +344,8 @@ class CreateDataset:
 
                 for file in os.listdir(base_path):
                     try:
+                        if file in loaded_files:
+                            continue
                         if file.endswith('.csv') and 'Москва' in file and year in file:  # and month in file:
                             print(f'Found next trip file: {file}')
                             # Use Python's CSV module to handle problematic files
@@ -406,12 +419,14 @@ class CreateDataset:
                             continue
                         # Добавляем столбцы года и месяца
                         df['S_DAY_ACTION'] = pd.to_datetime(df['S_DAY_ACTION'], dayfirst=True)
-                        df['S_DAY_ACTION'] = df['S_DAY_ACTION'].apply(lambda x: x.replace(day=1))
+                        df['S_DAY_ACTION'] = df['S_DAY_ACTION'].dt.to_period('M').dt.to_timestamp()
+                        df = df[df['S_DAY_ACTION'].between(window_start, self.data_load_date, inclusive='left')].copy()
                         df['spec_year'] = (df['S_DAY_ACTION'].dt.year)
                         df['spec_month'] = (df['S_DAY_ACTION'].dt.month)
                         #df = df.rename(columns={'S_DAY_ACTION': 'spec_date'})
 
                         all_trips.append(df)
+                        loaded_files.add(file)
                     except Exception as e:
                         print(f"Ошибка при обработке файла {file}: {str(e)}")
                         raise e
@@ -535,31 +550,31 @@ class CreateDataset:
 
 
     def match_inn(self, inn):
-        try:
-            if inn in self.renaming_df['OLD_INN']:
-                sample = self.renaming_df.loc[self.renaming_df['OLD_INN'] == inn]
-                if len(sample) == 1: # one or several old inns -> one new inn
-                    return sample['NEW_INN'].item()
-                elif len(sample['NEW_INN'].unique()) == 1:  # in fact, same situation
-                    return sample['NEW_INN'].loc[0].item()
-                else:
-                    return inn  # if one old inn transfers to several new inns, lets use the old
-            elif inn in self.renaming_df['NEW_INN']:
-                sample = self.renaming_df.loc[self.renaming_df['NEW_INN'] == inn]
-                if len(sample) > 1: # several old inns -> one new inn
-                    return inn
-                else:
-                    old_inn = sample['OLD_INN'].item()
-                    old_inns_sample = self.renaming_df.loc[self.renaming_df['OLD_INN'] == old_inn]
-                    if len(old_inns_sample) > 0:  # one old inn -> several new inns
-                        return old_inn
-                    else:
-                        return inn
+        if pd.isna(inn):
             return inn
-        except (ValueError, AttributeError):
-            return None
+        if self._inn_lookup_source is not self.renaming_df:
+            # Preserve the one-step merge/split rules without scanning the table for every trip.
+            old_targets = self.renaming_df.groupby('OLD_INN', sort=False)['NEW_INN'].unique().to_dict()
+            new_sources = self.renaming_df.groupby('NEW_INN', sort=False)['OLD_INN'].agg(
+                source_count='nunique', source_first=lambda values: values.iloc[0]
+            )
+            lookup = {}
+            for old_inn, targets in old_targets.items():
+                lookup[old_inn] = targets[0] if len(targets) == 1 else old_inn
+            for new_inn, sources in new_sources.iterrows():
+                if new_inn in lookup:
+                    continue
+                old_inn = sources['source_first']
+                if sources['source_count'] == 1 and len(old_targets.get(old_inn, ())) > 1:
+                    lookup[new_inn] = old_inn
+                else:
+                    lookup[new_inn] = new_inn
+            self._inn_lookup = lookup
+            self._inn_lookup_source = self.renaming_df
+        return self._inn_lookup.get(inn, inn)
 
     def is_seasonal(self, group):
+        group = group[group['Month'] < group['upper_bound']]
         # Find all years when client was active
         active_years = group['Month'].dt.year.unique()
 
@@ -639,8 +654,8 @@ class CreateDataset:
         if len(group) == 0:
             return pd.DataFrame()
         latest_date = group['upper_bound'].iloc[0]
-        date_12_months_ago = latest_date - relativedelta(months=n-1)
-        _12_months = group[group['Month'].between(date_12_months_ago, latest_date)]
+        date_12_months_ago = latest_date - relativedelta(months=n)
+        _12_months = group[(group['Month'] >= date_12_months_ago) & (group['Month'] < latest_date)]
         #if len(_12_months['Month']) > 12:
         #    print(f'---------------Attention: 12 months {_12_months}, {latest_date}, {date_12_months_ago}')
         return _12_months
@@ -706,7 +721,7 @@ class CreateDataset:
         for n, archive in enumerate([temperature, rains]):
             print('Processing next weather archive...')
             for idx, row in result.iterrows():
-                ub = row['upper_bound']
+                ub = row['upper_bound'] - pd.DateOffset(months=1)
                 temp = archive.loc[archive['year'].isin([ub.year, ub.year-1])]
                 temp_sum = 0
                 for i in range(6):  # last 6 months 'tail'
@@ -732,7 +747,7 @@ class CreateDataset:
                         tems_sum_winter += val
 
                 result.at[idx, 'weather_sum_' + str(n)] = temp_sum
-                result.at[idx, 'weather_avg_' + str(n)] = temp_sum / 12
+                result.at[idx, 'weather_avg_' + str(n)] = temp_sum / 6
                 result.at[idx, 'weather_winter_sum_' + str(n)] = tems_sum_winter
                 result.at[idx, 'weather_winter_avg_' + str(n)] = tems_sum_winter / 5
         return result
@@ -785,13 +800,13 @@ class CreateDataset:
         def safe_convert(val):
             try:
                 # Handle NaN/None first
-                if pd.isna(val) or val == np.NAN or val is None or val == 'NaN':
+                if pd.isna(val):
                     return 0
 
                 # Convert to string and process
-                s = str(val).split(',')[0].replace(' ', '')
-                return int(s) if s not in ['', '-'] else 0
-            except:
+                s = ''.join(str(val).split()).replace(',', '.')
+                return int(float(s)) if s not in ['', '-'] else 0
+            except (ValueError, TypeError, OverflowError):
                 return 0
 
         debits_df['Период'] = debits_df['Период'].apply(safe_convert)
@@ -803,19 +818,19 @@ class CreateDataset:
         all_debits = self.collect_all_debits()
         latest_dates = result[['INN', 'upper_bound', 'Latest_date', 'start_date', '6m_date', '3m_date']]
         d_merged = pd.merge(all_debits, latest_dates, on='INN', how='inner')
-        d_last_12 = d_merged[d_merged['spec_date'].between(d_merged['start_date'], d_merged['upper_bound'])]
-        d_last_6 = d_merged[d_merged['spec_date'].between(d_merged['6m_date'], d_merged['upper_bound'])]
-        d_last_3 = d_merged[d_merged['spec_date'].between(d_merged['3m_date'], d_merged['upper_bound'])]
+        d_last_12 = d_merged[d_merged['spec_date'].between(d_merged['start_date'], d_merged['upper_bound'], inclusive='left')].copy()
+        d_last_6 = d_merged[d_merged['spec_date'].between(d_merged['6m_date'], d_merged['upper_bound'], inclusive='left')].copy()
+        d_last_3 = d_merged[d_merged['spec_date'].between(d_merged['3m_date'], d_merged['upper_bound'], inclusive='left')].copy()
 
         d_last_12['debit'] = d_last_12['Всего'] - d_last_12['Период']
         d_last_6['debit'] = d_last_6['Всего'] - d_last_6['Период']
         d_last_3['debit'] = d_last_3['Всего'] - d_last_3['Период']
 
         for n, period_df in [('12', d_last_12), ('6', d_last_6), ('3', d_last_3)]:
-            d_info = period_df.groupby('INN').apply(lambda x: pd.Series({
-                'sum_debits_'+n: x['debit'].astype(int).sum(),
-                'n_debits_'+n: x['debit'].notna().astype(int).replace(0, np.nan).count()
-            })).reset_index()
+            d_info = period_df.groupby('INN')['debit'].agg(**{
+                'sum_debits_'+n: 'sum',
+                'n_debits_'+n: 'count'
+            }).reset_index()
 
             result = pd.merge(result, d_info, on='INN', how='left').fillna(0)
 
@@ -998,13 +1013,13 @@ class CreateDataset:
 
     def _add_date_bounds(self, df):
         df['start_date'] = df['upper_bound'].apply(
-            lambda x: x - pd.DateOffset(months=11)
+            lambda x: x - pd.DateOffset(months=12)
         )
         df['3m_date'] = df['upper_bound'].apply(
-            lambda x: x - pd.DateOffset(months=2)
+            lambda x: x - pd.DateOffset(months=3)
         )
         df['6m_date'] = df['upper_bound'].apply(
-            lambda x: x - pd.DateOffset(months=5)
+            lambda x: x - pd.DateOffset(months=6)
         )
         return df
 
@@ -1068,7 +1083,7 @@ class CreateDataset:
         specs_last_12 = specs_merged[
             specs_merged['spec_date'].between(
                 specs_merged['start_date'],
-                specs_merged['upper_bound']
+                specs_merged['upper_bound'], inclusive='left'
             )
         ]
 
@@ -1149,7 +1164,7 @@ class CreateDataset:
         trips_last_12 = trips_merged[
             trips_merged['S_DAY_ACTION'].between(
                 trips_merged['start_date'],
-                trips_merged['upper_bound']
+                trips_merged['upper_bound'], inclusive='left'
             )
         ]
 
@@ -1223,16 +1238,16 @@ class CreateDataset:
 
 
 def main():
-    for m in range(1, 10):
+    for m in range(12, 13):
         config = {
             'cutoff_date': datetime(2026, 2, 28),
             'cutoff_date_soft': datetime(2026, 3, 30),
-            'test_dataset_snapshot_date': datetime(2026, 5,
+            'test_dataset_snapshot_date': datetime(2026, 9,
                                                   1),  # the border where test data starts. To take test attrition dates starting from this date
             # The period to collect all the clients active for at least one day within
             # (data_begin_date is not the bound for historical information retrieval):
-            'data_begin_date': datetime(2024, min(m+1, 12), 1),
-            'data_load_date': datetime(2025, m, 1),
+            'data_begin_date': datetime(2023, 1, 1),
+            'data_load_date': datetime(2023, m, 1),
             'edit_censored_data': False,
             'horison': 6,  # months to predict ahead
             'randomize': False # Now always False
